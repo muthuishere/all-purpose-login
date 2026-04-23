@@ -1,0 +1,57 @@
+version: '3'
+
+vars:
+  BINARY: apl
+  MODULE: github.com/muthuishere/all-purpose-login
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo none
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  LDFLAGS: -s -w -X {{.MODULE}}/internal/version.Version={{.VERSION}} -X {{.MODULE}}/internal/version.Commit={{.COMMIT}} -X {{.MODULE}}/internal/version.Date={{.DATE}}
+
+tasks:
+  default:
+    cmds:
+      - task: test
+
+  tidy:
+    cmds:
+      - go mod tidy
+
+  build:
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/{{.BINARY}} ./cmd/apl
+
+  install:
+    cmds:
+      - go install -ldflags "{{.LDFLAGS}}" ./cmd/apl
+
+  test:
+    cmds:
+      - go test ./...
+
+  test:verbose:
+    cmds:
+      - go test -v ./...
+
+  test:cover:
+    cmds:
+      - go test -cover ./...
+
+  fmt:
+    cmds:
+      - gofmt -s -w .
+
+  vet:
+    cmds:
+      - go vet ./...
+
+  run:
+    cmds:
+      - go run ./cmd/apl {{.CLI_ARGS}}
+
+  clean:
+    cmds:
+      - rm -rf bin/
