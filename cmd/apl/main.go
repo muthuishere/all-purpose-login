@@ -52,7 +52,6 @@ func main() {
 	reg, _ := provider.DefaultRegistry(cfg)
 
 	root.AddCommand(cli.LoginCmd(reg, st, os.Stdout, os.Stderr))
-	root.AddCommand(cli.TokenCmd(reg, st, os.Stdout, os.Stderr))
 	root.AddCommand(cli.LogoutCmd(reg, st, os.Stdout, os.Stderr))
 	root.AddCommand(cli.AccountsCmd(reg, st, os.Stdout, os.Stderr))
 	root.AddCommand(cli.ScopesCmd(reg, os.Stdout, os.Stderr))

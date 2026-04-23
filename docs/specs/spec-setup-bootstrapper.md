@@ -137,19 +137,30 @@ Sequence, each step announced with a prefix line (`→`) before running:
 
    Capture `appId` from output.
 
-3. **Grant delegated Graph permissions.** Microsoft Graph resource ID is well-known: `00000003-0000-0000-c000-000000000000`. Permission GUIDs (delegated scope IDs):
+3. **Grant delegated Graph permissions.** Microsoft Graph resource ID is well-known: `00000003-0000-0000-c000-000000000000`.
 
-   | Scope              | GUID                                   |
-   |--------------------|----------------------------------------|
-   | `Mail.Read`        | `570282fd-fa5c-430d-a7fd-fc8dc98a9dca` |
-   | `Mail.Send`        | `e383f46e-2787-4529-855e-0e479a3ffac0` |
-   | `Calendars.ReadWrite` | `1ec239c2-d7c9-4623-a91a-a9775856bb36` |
-   | `Chat.Read`        | `f501c180-9344-439a-bca0-6cbf209fd270` |
-   | `ChatMessage.Send` | `9ff7295e-131b-4d94-90e1-69fde507ac11` |
-   | `User.Read`        | `e1fe6dd8-ba31-4d61-89e7-88639da4683d` |
-   | `offline_access`   | `7427e0e9-2fba-42fe-b0c0-848c9e6a8182` |
+   We do **not** hardcode permission GUIDs. Before the permission-add loop, fetch the Graph service principal once and build a name→GUID map at runtime:
 
-   For each GUID, run:
+   ```bash
+   az ad sp show --id 00000003-0000-0000-c000-000000000000 \
+       --query "oauth2PermissionScopes[].{name:value, id:id, type:type}" -o json
+   ```
+
+   Default delegated scope set (granted unconditionally):
+
+   - `User.Read`
+   - `offline_access`
+   - `openid`
+   - `email`
+   - `profile`
+   - `Mail.ReadWrite`
+   - `Mail.Send`
+   - `Calendars.ReadWrite`
+   - `Chat.ReadWrite`
+   - `ChatMessage.Send`
+   - `OnlineMeetings.Read`
+
+   For each scope NAME, look up its GUID in the map and run:
 
    ```bash
    az ad app permission add \
@@ -158,7 +169,20 @@ Sequence, each step announced with a prefix line (`→`) before running:
      --api-permissions <GUID>=Scope
    ```
 
-   No admin consent is requested. Delegated scopes consent at login time per user.
+   No admin consent is requested for these — delegated scopes consent at login time per user.
+
+3a. **Opt-in admin-consent scope.** Prompt the user:
+
+   ```
+   Include OnlineMeetingRecording.Read.All? (requires tenant admin consent) [y/N]:
+   ```
+
+   If yes, look up `OnlineMeetingRecording.Read.All` first in the `oauth2PermissionScopes` map, then in the service principal's `appRoles` array (it may be delegated or application-only depending on Microsoft's current publishing). Grant using the matching `--api-permissions <GUID>=Scope` or `=Role` accordingly. After granting, print to stderr:
+
+   ```
+   note: OnlineMeetingRecording.Read.All requires tenant admin consent. As tenant admin, run:
+       az ad app permission admin-consent --id <appId>
+   ```
 
 4. **Write to config.** Append or update the `microsoft:` block in the config file (see SETUP-7).
 
@@ -168,7 +192,7 @@ Sequence, each step announced with a prefix line (`→`) before running:
    ✓ Microsoft configured
        appId: 11111111-2222-3333-4444-555555555555
        tenant: common
-       scopes: 7 delegated Graph permissions
+       scopes: 11 Graph permissions
    ```
 
 ### SETUP-5 — Google flow (partial automation)
@@ -371,7 +395,9 @@ Exit codes match the CLI surface convention: `0` success, `1` user/generic, `2` 
 ## Acceptance Criteria
 
 - [ ] `apl setup` on a clean machine with both CLIs logged in writes a valid `~/.config/apl/config.yaml` containing both `google:` and `microsoft:` blocks.
-- [ ] `apl setup ms` alone creates an Azure app registration named `apl-<whoami>-<hex>`, grants exactly the 7 delegated Graph permissions listed in SETUP-4, and writes the `microsoft:` block.
+- [ ] `apl setup ms` alone creates an Azure app registration named `apl-<whoami>-<hex>`, grants the 11 delegated Graph permissions listed in SETUP-4 (GUIDs looked up at runtime via `az ad sp show`), and writes the `microsoft:` block.
+- [ ] `apl setup ms` prompts for `OnlineMeetingRecording.Read.All`; declining skips it, accepting grants it and prints the admin-consent follow-up command to stderr.
+- [ ] No hardcoded Graph permission GUID appears anywhere in the source tree — every GUID is resolved from `az ad sp show` output.
 - [ ] `apl setup google` alone creates (or reuses) a GCP project `apl-*`, enables Gmail + Calendar + People APIs, prints the 3-step console walkthrough with real URLs substituted, accepts a pasted Client ID, validates it via an `openid email profile` round-trip, and writes the `google:` block.
 - [ ] Re-running `apl setup` after a successful run exits `0` with a green-check message and writes nothing.
 - [ ] `apl setup --reconfigure` re-runs prompts even when configured; existing values are offered as defaults.
@@ -395,7 +421,7 @@ Exit codes match the CLI surface convention: `0` success, `1` user/generic, `2` 
   - `internal/setup/config.go` — load/merge/write YAML with atomic rename + chmod.
 - Shell out via `exec.CommandContext` with the parent context bound to a signal handler that catches SIGINT and returns a sentinel `ErrAborted` — this is how Ctrl-C mid-flow exits cleanly at `1`.
 - Google OAuth round-trip reuses the PKCE loopback implementation from `spec-oauth-pkce-loopback.md`. Setup does not persist the resulting token — it is immediately discarded after `email` is verified.
-- The Graph permission GUID table should live as a `var graphPermissions = []struct{ name, guid string }{...}` literal, not a YAML file — the list is small, version-locked, and changing it is a deliberate code change.
+- The Graph permission GUIDs are **not** stored in the source tree. At setup time, `az ad sp show --id 00000003-0000-0000-c000-000000000000 --query "oauth2PermissionScopes[].{name:value, id:id, type:type}" -o json` is shelled out once and parsed into a `map[string]string` (name → GUID). The default scope NAME list IS code-resident (a small ordered `[]string`) because changing the default set is a deliberate product decision. For the admin-consent opt-in, both `oauth2PermissionScopes` and `appRoles` are consulted — Microsoft moves scopes between the two.
 - All user-facing strings should be in one file (`internal/setup/messages.go`) for future i18n, even though v1 is English-only.
 - Pseudocode for the top-level loop:
 
@@ -461,5 +487,5 @@ Exit codes match the CLI surface convention: `0` success, `1` user/generic, `2` 
 
 - Atomic-write test: simulate a failing write partway, assert `config.yaml` is unchanged.
 - Idempotency test: pre-seed a valid config, run `Run()` with flags = empty, assert zero shell-outs.
-- Permission-table test: assert the MS GUID table contains exactly the 7 expected scopes.
+- Permission-table test: stub `az ad sp show` with a canned `oauth2PermissionScopes` array; assert the permission-add loop runs `az ad app permission add` once per default-scope NAME with the GUID taken from the stubbed response (not from any hardcoded constant).
 - Regex test: Client ID validator accepts a real Google ID, rejects a secret, rejects UUID, rejects empty.

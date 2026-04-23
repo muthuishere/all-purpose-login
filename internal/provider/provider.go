@@ -16,6 +16,8 @@ type Provider interface {
 	Name() string
 	Login(ctx context.Context, label string, opts LoginOpts) (*store.TokenRecord, error)
 	Token(ctx context.Context, rec *store.TokenRecord, scope string) (access string, refreshed *store.TokenRecord, err error)
+	Refresh(ctx context.Context, rec *store.TokenRecord) (access string, refreshed *store.TokenRecord, err error)
 	Logout(ctx context.Context, rec *store.TokenRecord) error
 	ExpandScopes(aliases []string) ([]string, error)
+	DefaultScopes() []string
 }

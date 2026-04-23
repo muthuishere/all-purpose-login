@@ -53,17 +53,28 @@ func runGoogle(
 	}
 	var accounts []gcloudAuthEntry
 	_ = json.Unmarshal([]byte(out), &accounts)
-	hasActive := false
+	activeAccount := ""
 	for _, a := range accounts {
 		if strings.EqualFold(a.Status, "ACTIVE") {
-			hasActive = true
+			activeAccount = a.Account
 			break
 		}
 	}
-	if !hasActive {
+	if activeAccount == "" {
 		return config.ProviderConfig{}, fmt.Errorf(
 			"%w: no active gcloud account\n    Run: gcloud auth login",
 			ErrNotLoggedIn)
+	}
+	// Fetch the project currently set in gcloud config for context.
+	curProjectOut, _, _ := shell.Run(ctx, "gcloud", "config", "get-value", "project")
+	curProject := strings.TrimSpace(curProjectOut)
+	if curProject == "" || curProject == "(unset)" {
+		curProject = "(none set)"
+	}
+	fmt.Fprintf(stdout, "\n  Google signed-in account: %s\n  Active project:           %s\n\n",
+		activeAccount, curProject)
+	if !prompter.Confirm("Continue as this account?") {
+		return config.ProviderConfig{}, fmt.Errorf("%w: cancelled by user (run `gcloud auth login` or `gcloud config set account <email>` to switch)", ErrNotLoggedIn)
 	}
 
 	// List projects.
@@ -93,16 +104,11 @@ func runGoogle(
 
 	var projectID string
 	if len(aplProjects) > 0 {
-		opts := make([]string, 0, len(aplProjects)+1)
-		for _, p := range aplProjects {
-			opts = append(opts, fmt.Sprintf("%s (%s)", p.ProjectID, p.Name))
-		}
-		opts = append(opts, "Create a new project")
-		choice := prompter.Pick("Existing apl-* GCP projects:", opts)
-		if choice < len(aplProjects) {
-			projectID = aplProjects[choice].ProjectID
-			fmt.Fprintf(stdout, "→ reusing %s\n", projectID)
-		}
+		// Always reuse an existing apl-* project — avoids drifting project
+		// sprawl on re-runs. To create a fresh one, delete the old project
+		// from GCP first.
+		projectID = aplProjects[0].ProjectID
+		fmt.Fprintf(stdout, "→ reusing %s\n", projectID)
 	} else {
 		if !prompter.Confirm("No apl-* projects found. Create a new one?") {
 			return config.ProviderConfig{}, fmt.Errorf("%w: user declined project creation", ErrProviderFailure)
@@ -191,8 +197,15 @@ Set the following:
   App name:          apl (local)
   User support email: <your email>
   Developer contact:  <your email>
-  Scopes:            (leave empty — apl requests at login time)
   Test users:        <your email>
+
+On the Scopes page, click "ADD OR REMOVE SCOPES" and add:
+  openid
+  https://www.googleapis.com/auth/userinfo.email
+  https://www.googleapis.com/auth/userinfo.profile
+  https://www.googleapis.com/auth/gmail.modify
+  https://www.googleapis.com/auth/calendar
+  https://www.googleapis.com/auth/contacts.readonly
 
 Click SAVE AND CONTINUE through each page, then PUBLISH or leave in Testing.
 

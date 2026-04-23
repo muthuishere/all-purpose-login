@@ -85,6 +85,8 @@ Provider-specific:
 - **Google** — authorize endpoint `https://accounts.google.com/o/oauth2/v2/auth`; always append `access_type=offline` and `prompt=consent` (the only reliable way to get a refresh token back every time, including on re-login)
 - **Microsoft** — authorize endpoint `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize`; `{tenant}` defaults to `common` and comes from `LoginOpts.Tenant`; if the scope list does not contain `offline_access` it is auto-prepended (Graph will not issue a refresh token otherwise)
 
+**OIDC scopes always merged.** Regardless of provider, both Google and Microsoft always have `openid`, `email`, `profile` merged into the requested scope list if any are missing. This ensures the returned ID token carries identity claims so `apl accounts` and `TokenRecord.Subject` can populate correctly even when the caller passes a narrow `--scope` override. The merge is idempotent and preserves caller ordering for non-OIDC scopes.
+
 ### OAUTH-5 — Browser open and headless fallback
 
 - Attempt `browser.OpenURL(authURL)` (via `github.com/pkg/browser`)
@@ -138,7 +140,7 @@ type tokenResp struct {
 - `TokenRecord.Subject` precedence: `email` → `upn` → `sub` (first non-empty)
 - **No signature verification in v1.** The ID token arrived over a TLS-validated HTTPS response from the provider's own token endpoint; we treat that channel as the proof. Document this in the code comment at the parse site
 
-### OAUTH-8 — Scope validation on `apl token`
+### OAUTH-8 — Scope validation (internal, used by provider.Token)
 
 - Load `TokenRecord` for `(provider, label)`. If missing: exit 1 with `no account "<label>" for provider "<provider>". Run: apl login <handle>`
 - Expand the requested scope alias (single scope per invocation by design)

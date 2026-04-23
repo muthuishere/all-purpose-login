@@ -8,7 +8,7 @@
 
 ## Problem
 
-`apl` is a token-broker CLI for Google and Microsoft. Users will script against it (`TOKEN=$(apl token google:work --scope gmail.readonly)`), pipe its output into `curl`, and parse its listings from shell and other languages. Before any internal flow is built, the user-facing surface — handles, flags, stdout/stderr contracts, exit codes, error strings — has to be pinned down so that:
+`apl` is a token-broker CLI for Google and Microsoft. Users will script against it (`TOKEN=$(apl login google:work)`), pipe its output into `curl`, and parse its listings from shell and other languages. Before any internal flow is built, the user-facing surface — handles, flags, stdout/stderr contracts, exit codes, error strings — has to be pinned down so that:
 
 - Scripts written against v1 keep working in v2.
 - Every subcommand has a single, predictable output shape.
@@ -23,7 +23,7 @@ The original PRD §5.1 used `<provider> --as <label>`. That has since been repla
 - Define every user-facing `apl` command, its arguments, and its flags.
 - Pin the handle grammar (`provider:label`) and its validation rule.
 - Fix exit codes so scripts can branch on them reliably.
-- Fix the stdout contract for `apl token` (pipeable to `curl`) and for `apl accounts` (table vs JSON).
+- Fix the stdout contract for `apl login` (pipeable to `curl`) and for `apl accounts` (table vs JSON).
 - Specify error message style and concrete example strings for the common failure modes.
 
 ---
@@ -82,33 +82,33 @@ Panics and unexpected runtime errors exit `1` with a stderr line prefixed `inter
 
 ### CLI-5 — `apl login <handle>`
 
-- Positional: exactly one handle (see CLI-2).
-- Flags:
+`apl login` is the single authenticate-and-get-token command. It is dual-mode:
+
+- **First use (no stored record, or `--force`)**: opens the browser, runs the full OAuth flow, consents the user, persists the refresh token, and prints the resulting access token.
+- **Subsequent use (record exists)**: no browser, no network round-trip unless a refresh is needed. If the cached access token is still valid (>30s headroom) it is printed as-is. If stale, the command silently rotates via `refresh_token` and prints the new token.
+
+Positional: exactly one handle (see CLI-2).
+
+Flags:
   - `--tenant <id>` — Microsoft only. Passing `--tenant` with a `google:` handle is a user error: stderr `--tenant is only valid for the ms provider`, exit 1.
-  - `--scope <scope>` — repeatable. Optional. If omitted, uses provider default minimal scopes:
-    - `google`: `openid email profile`
-    - `ms`: `openid profile offline_access User.Read`
-  - `--force` — re-consent even if a token for this handle already exists.
-- Behavior summary: runs the OAuth flow (see dependent spec), persists the record under the handle, prints `Signed in as <email> (handle: <provider>:<label>)` on success.
-- Exit: 0 success, 1 user error, 2 auth denied / flow aborted, 3 network error.
+  - `--scope <scope>` — repeatable. Optional. If omitted, the provider's default scope set is requested on first login (see below). If supplied on first login, the user has taken over and only the listed scopes (plus OIDC: `openid email profile`, always merged) are requested. On subsequent calls with a record present, `--scope` is ignored for the cached-token/refresh path.
+  - `--force` — always run the browser flow, overwriting any existing record.
 
-### CLI-6 — `apl token <handle> --scope <scope>`
+Provider default scope sets (requested at first `apl login` when `--scope` is absent):
+  - `google`: `openid email profile`, `gmail.modify`, `calendar`, `contacts.readonly`
+  - `ms`: `openid email profile offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Chat.ReadWrite ChatMessage.Send OnlineMeetings.Read`
 
-- Positional: exactly one handle.
-- Required flag: `--scope <scope>` (single value; repeats are a user error — token output is for one API call).
-- stdout contract on success: the raw access token followed by a single `\n`. Nothing else is ever written to stdout. This makes `TOKEN=$(apl token google:work --scope gmail.readonly)` safe under `set -e` and under shells that strip trailing newlines from command substitution.
-- stderr on success: empty.
-- No `--json` flag. Structured introspection is a separate future command.
-- Auto-refresh: if stored access token is within 30s of expiry or already expired, the command refreshes silently using the stored refresh token before printing.
-- If the requested scope is not in the stored record's granted-scopes set, fail hard — do NOT auto-trigger a login:
-  - stderr: `scope "<scope>" not granted for <handle>. Run: apl login <handle> --scope <scope> --force`
-  - exit 2.
-- If no account is stored for this handle:
-  - stderr: `no account for <handle>. Run: apl login <handle>`
-  - exit 2.
-- If refresh fails with `invalid_grant` / refresh token expired:
-  - stderr: `token refresh failed: refresh token expired. Run: apl login <handle>`
-  - exit 2.
+Output contract:
+  - **stdout**: the raw access token followed by a single `\n`. Nothing else — ever. This keeps `TOKEN=$(apl login ms:work)` working on both first use and repeated calls.
+  - **stderr**: human-readable progress on the browser-flow path (`→ Opening browser for google sign-in…`, `✓ Signed in as <subject> (handle: <provider>:<label>)`). Empty on the cached/refresh path.
+
+Failure modes:
+  - No client ID configured for provider → stderr `provider "<p>" not configured. Run: apl setup <p>`, exit 1.
+  - Refresh fails with `invalid_grant` → stderr `token refresh failed: refresh token expired. Run: apl login <handle> --force`, exit 2.
+  - Browser / loopback flow aborted → exit 2.
+  - Network / provider 5xx → exit 3.
+
+Exit: 0 success, 1 user error, 2 auth denied / flow aborted, 3 network error.
 
 ### CLI-7 — `apl logout <handle>`
 
@@ -209,10 +209,11 @@ profile             openid email profile
 - [ ] CLI-2: `apl login google:work!` exits 1 (invalid label char).
 - [ ] CLI-2: `apl login slack:x` exits 1 with `unknown provider "slack"`.
 - [ ] CLI-5: `apl login ms:x --tenant foo` is accepted; `apl login google:x --tenant foo` exits 1.
-- [ ] CLI-6: `TOKEN=$(apl token google:work --scope gmail.readonly); echo "[$TOKEN]"` yields `[ya29....]` with no embedded whitespace.
-- [ ] CLI-6: `apl token google:nonexistent --scope x` exits 2 with `no account for google:nonexistent. Run: apl login google:nonexistent`.
-- [ ] CLI-6: `apl token google:work --scope scope.not.granted` exits 2 and does NOT open a browser.
-- [ ] CLI-6: expired access token with valid refresh token → token output works, no user prompt.
+- [ ] CLI-5: `TOKEN=$(apl login google:work); echo "[$TOKEN]"` yields `[ya29....]` with no embedded whitespace on BOTH first use (browser) and subsequent (cached) calls.
+- [ ] CLI-5: second `apl login google:work` with a valid cached token does NOT open a browser and makes no network call.
+- [ ] CLI-5: expired access token with valid refresh token → silent rotation, token on stdout, no prompt.
+- [ ] CLI-5: `apl login google:work --force` opens the browser even when a valid record exists.
+- [ ] CLI-5: on the browser-flow path, stdout has exactly `<token>\n`; all progress lines land on stderr.
 - [ ] CLI-7: `apl logout google:nonexistent` exits 2.
 - [ ] CLI-8: `apl accounts --json | jq '.[0].handle'` returns a string matching the handle regex.
 - [ ] CLI-8: `apl accounts` with zero accounts exits 0 and prints a hint (not an error).
@@ -237,7 +238,7 @@ const (
 )
 ```
 
-- `apl token` output must use `fmt.Println(token)` (single trailing `\n`); never `fmt.Print` with manual newline handling, never structured log libraries that flush extra whitespace.
+- `apl login` stdout must use `fmt.Println(token)` (single trailing `\n`); never `fmt.Print` with manual newline handling, never structured log libraries that flush extra whitespace. Status messages go to `stderr` via `fmt.Fprintf(stderr, …)`.
 - `apl accounts --json` uses `encoding/json` with `SetIndent("", "  ")` for readability; script consumers should `jq` over it rather than parse raw — indentation is not part of the contract, field names and types are.
 - Error strings are defined as constants in `internal/cli/errors.go` so tests can assert on them.
 - Help text for each command is owned by the command file; keep it under 15 lines.
@@ -262,8 +263,8 @@ func (h Handle) String() string       // "provider:label"
 ```go
 // internal/cli/runner.go
 type Runner interface {
-    Login(ctx context.Context, h handle.Handle, opts LoginOpts) error
-    Token(ctx context.Context, h handle.Handle, scope string) (string, error)
+    // Login runs the dual-mode login path and returns the access token to print.
+    Login(ctx context.Context, h handle.Handle, opts LoginOpts) (string, error)
     Logout(ctx context.Context, h handle.Handle) error
     Accounts(ctx context.Context) ([]AccountRow, error)
     Scopes(provider string) ([]ScopeAlias, error)
@@ -287,18 +288,18 @@ apl login slack:x;         echo "exit=$?"   # expect: unknown provider, exit=1
 # CLI-5: tenant flag gate
 apl login google:x --tenant foo; echo "exit=$?"  # expect: error, exit=1
 
-# CLI-6: token pipeability
-TOKEN=$(apl token google:work --scope gmail.readonly)
+# CLI-5: token pipeability (works on first use AND subsequent calls)
+TOKEN=$(apl login google:work)
 test -n "$TOKEN" && echo "got token, len=${#TOKEN}"
 curl -s -H "Authorization: Bearer $TOKEN" \
   https://gmail.googleapis.com/gmail/v1/users/me/profile | jq .emailAddress
 
-# CLI-6: missing account
-apl token google:does-not-exist --scope gmail.readonly; echo "exit=$?"  # expect exit=2
+# CLI-5: second call is cache-only (no browser)
+TIME=$( { time apl login google:work >/dev/null; } 2>&1 )
+echo "$TIME"  # should be sub-second
 
-# CLI-6: ungranted scope does NOT open browser
-apl token google:work --scope gmail.send 2>&1 | grep -q 'not granted'
-echo "exit=$?"  # expect 0 (grep matched)
+# CLI-5: --force re-opens the browser
+apl login google:work --force
 
 # CLI-7: logout missing
 apl logout google:nobody; echo "exit=$?"  # expect exit=2

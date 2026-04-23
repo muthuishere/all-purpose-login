@@ -22,6 +22,7 @@ func goodMSFakeShell() *fakeShell {
 	fs := newFakeShell()
 	fs.setAvailable("az", true)
 	fs.respond("az account", fakeResp{Stdout: `{"user":{"name":"u"}}`})
+	stubGraphSP(fs)
 	fs.respond("az ad app list", fakeResp{Stdout: `[]`})
 	fs.respond("az ad app",
 		fakeResp{Stdout: `{"appId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}`})
@@ -33,6 +34,7 @@ func goodGoogleFakeShell() *fakeShell {
 	fs := newFakeShell()
 	fs.setAvailable("gcloud", true)
 	fs.respond("gcloud auth", fakeResp{Stdout: `[{"account":"u@x.com","status":"ACTIVE"}]`})
+	fs.respond("gcloud config", fakeResp{Stdout: "my-current-project\n"})
 	fs.respond("gcloud projects", fakeResp{Stdout: `[{"projectId":"apl-muthu-abc","name":"x"}]`})
 	fs.respond("gcloud services", fakeResp{Stdout: ""})
 	return fs
@@ -112,8 +114,8 @@ func TestSetup_Reconfigure_ForcesReprompting(t *testing.T) {
 
 	fs := goodGoogleFakeShell()
 	p := &fakePrompter{
-		picks:  []int{0},
-		inputs: []string{"409786642553-zyxwvutsrqponmlkjihgfedcba012345.apps.googleusercontent.com"},
+		confirms: []bool{true}, // confirm active account
+		inputs:   []string{"409786642553-zyxwvutsrqponmlkjihgfedcba012345.apps.googleusercontent.com"},
 	}
 	v := &fakeValidator{}
 
@@ -181,8 +183,8 @@ func TestSetup_ProviderFilter_GoogleOnly(t *testing.T) {
 
 	fs := goodGoogleFakeShell()
 	p := &fakePrompter{
-		picks:  []int{0},
-		inputs: []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		confirms: []bool{true},
+		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
 	}
 	v := &fakeValidator{}
 	opts := SetupOptions{
@@ -216,9 +218,8 @@ func TestSetup_AbortMidFlow_NoPartialConfig(t *testing.T) {
 	// Google shell is fine, but validator fails and user says no.
 	fs := goodGoogleFakeShell()
 	p := &fakePrompter{
-		picks:    []int{0},
 		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
-		confirms: []bool{false},
+		confirms: []bool{true, false}, // confirm account, decline retry
 	}
 	v := &fakeValidator{errors: []error{someErr("invalid_client")}}
 

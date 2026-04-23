@@ -47,12 +47,13 @@ func TestGoogle_ReuseExistingProject(t *testing.T) {
 	fs := newFakeShell()
 	fs.setAvailable("gcloud", true)
 	fs.respond("gcloud auth", fakeResp{Stdout: `[{"account":"u@x.com","status":"ACTIVE"}]`})
+	fs.respond("gcloud config", fakeResp{Stdout: "my-current-project\n"})
 	fs.respond("gcloud projects", fakeResp{Stdout: `[{"projectId":"apl-muthu-abc","name":"apl muthu"},{"projectId":"other","name":"other"}]`})
 	fs.respond("gcloud services", fakeResp{Stdout: ""})
 
 	p := &fakePrompter{
-		picks:  []int{0}, // pick first apl-* project
-		inputs: []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		confirms: []bool{true}, // confirm active account
+		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
 	}
 	v := &fakeValidator{}
 
@@ -89,12 +90,13 @@ func TestGoogle_CreateNewProject(t *testing.T) {
 	fs := newFakeShell()
 	fs.setAvailable("gcloud", true)
 	fs.respond("gcloud auth", fakeResp{Stdout: `[{"account":"u@x.com","status":"ACTIVE"}]`})
+	fs.respond("gcloud config", fakeResp{Stdout: "(unset)\n"})
 	fs.respond("gcloud projects", fakeResp{Stdout: `[]`})
 	fs.respond("gcloud services", fakeResp{Stdout: ""})
 
-	// No existing projects → prompter asked to confirm create; returns true.
+	// confirms: [account-confirm=true, create-new=true]
 	p := &fakePrompter{
-		confirms: []bool{true},
+		confirms: []bool{true, true},
 		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
 	}
 	v := &fakeValidator{}
@@ -124,14 +126,14 @@ func TestGoogle_ClientIDValidationFails_ThenAbort(t *testing.T) {
 	fs := newFakeShell()
 	fs.setAvailable("gcloud", true)
 	fs.respond("gcloud auth", fakeResp{Stdout: `[{"account":"u@x.com","status":"ACTIVE"}]`})
+	fs.respond("gcloud config", fakeResp{Stdout: "my-current-project\n"})
 	fs.respond("gcloud projects", fakeResp{Stdout: `[{"projectId":"apl-muthu-abc","name":"x"}]`})
 	fs.respond("gcloud services", fakeResp{Stdout: ""})
 
-	// Validator fails, user declines retry.
+	// confirms: [account-confirm=true, retry-after-validator-fail=false]
 	p := &fakePrompter{
-		picks:    []int{0},
 		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
-		confirms: []bool{false}, // retry? → no
+		confirms: []bool{true, false},
 	}
 	v := &fakeValidator{errors: []error{errors.New("invalid_client")}}
 
@@ -148,13 +150,14 @@ func TestGoogle_WalkthroughIncludesProjectURL(t *testing.T) {
 	fs := newFakeShell()
 	fs.setAvailable("gcloud", true)
 	fs.respond("gcloud auth", fakeResp{Stdout: `[{"account":"u@x.com","status":"ACTIVE"}]`})
+	fs.respond("gcloud config", fakeResp{Stdout: "my-current-project\n"})
 	fs.respond("gcloud projects", fakeResp{Stdout: `[{"projectId":"apl-muthu-abc","name":"x"}]`})
 	fs.respond("gcloud services", fakeResp{Stdout: ""})
 
 	var stdout bytes.Buffer
 	p := &fakePrompter{
-		picks:  []int{0},
-		inputs: []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		confirms: []bool{true},
+		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
 	}
 	v := &fakeValidator{}
 

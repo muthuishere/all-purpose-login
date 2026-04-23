@@ -17,38 +17,27 @@ import (
 // Microsoft Graph API well-known resource ID.
 const graphAPIResourceID = "00000003-0000-0000-c000-000000000000"
 
-// Delegated scope GUIDs for Microsoft Graph.
-// Source: Microsoft Graph delegated permissions (oauth2PermissionScopes on the
-// Graph service principal). The canonical values are in the spec at
-// docs/specs/spec-setup-bootstrapper.md §SETUP-4. For one-off verification:
-//
-//	az ad sp show --id 00000003-0000-0000-c000-000000000000 \
-//	    --query "oauth2PermissionScopes[?value=='Mail.Read'].id" -o tsv
-const (
-	graphPermUserRead           = "e1fe6dd8-ba31-4d61-89e7-88639da4683d"
-	graphPermMailRead           = "570282fd-fa5c-430d-a7fd-fc8dc98a9dca"
-	graphPermMailSend           = "e383f46e-2787-4529-855e-0e479a3ffac0"
-	graphPermCalendarsReadWrite = "1ec239c2-d7c9-4623-a91a-a9775856bb36"
-	graphPermChatRead           = "f501c180-9344-439a-bca0-6cbf209fd270"
-	graphPermChatMessageSend    = "9ff7295e-131b-4d94-90e1-69fde507ac11"
-	graphPermOfflineAccess      = "7427e0e9-2fba-42fe-b0c0-848c9e6a8182"
-)
-
-// graphDelegatedPermissions is the ordered list of delegated scopes granted to
-// a freshly created apl app registration. Values are "<guid>=Scope" — az's
-// expected --api-permissions syntax.
-var graphDelegatedPermissions = []struct {
-	Name string
-	GUID string
-}{
-	{"User.Read", graphPermUserRead},
-	{"Mail.Read", graphPermMailRead},
-	{"Mail.Send", graphPermMailSend},
-	{"Calendars.ReadWrite", graphPermCalendarsReadWrite},
-	{"Chat.Read", graphPermChatRead},
-	{"ChatMessage.Send", graphPermChatMessageSend},
-	{"offline_access", graphPermOfflineAccess},
+// defaultGraphDelegatedScopes is the ordered list of delegated Graph scope
+// NAMES granted to a freshly-created apl app registration. GUIDs are resolved
+// at runtime via `az ad sp show` on the Graph service principal — we never
+// hardcode them, because Microsoft occasionally adds/splits scopes.
+var defaultGraphDelegatedScopes = []string{
+	"User.Read",
+	"offline_access",
+	"openid",
+	"email",
+	"profile",
+	"Mail.ReadWrite",
+	"Mail.Send",
+	"Calendars.ReadWrite",
+	"Chat.ReadWrite",
+	"ChatMessage.Send",
+	"OnlineMeetings.Read",
 }
+
+// optInAdminConsentScope is offered via a prompt. Granting it requires tenant
+// admin consent and covers meeting-recording access.
+const optInAdminConsentScope = "OnlineMeetingRecording.Read.All"
 
 // ErrMissingCLI / ErrNotLoggedIn / ErrProviderFailure are sentinel errors
 // surfaced by setup flows so the orchestrator can map them to exit codes.
@@ -75,6 +64,15 @@ type azAccountShow struct {
 type azAppCreateResp struct {
 	AppID       string `json:"appId"`
 	DisplayName string `json:"displayName"`
+}
+
+// graphPermScope is an entry in the Graph service principal's
+// oauth2PermissionScopes (delegated) or appRoles (app-only) arrays, projected
+// by az's --query.
+type graphPermScope struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+	Type string `json:"type"` // "Scope" (delegated) or "Role" (app)
 }
 
 func runMicrosoft(
@@ -110,6 +108,17 @@ func runMicrosoft(
 		return config.ProviderConfig{}, fmt.Errorf("%w: cancelled by user (run `az login` to switch accounts)", ErrNotLoggedIn)
 	}
 
+	// Fetch Graph service principal permission table (both delegated + app-role)
+	// so scope names resolve to current GUIDs without any hardcoding.
+	delegated, appRoles, err := fetchGraphPermissions(ctx, shell)
+	if err != nil {
+		return config.ProviderConfig{}, err
+	}
+
+	// Ask up-front about the admin-consent opt-in scope.
+	includeRecording := prompter.Confirm(
+		fmt.Sprintf("Include %s? (requires tenant admin consent)", optInAdminConsentScope))
+
 	// List existing apl-* apps.
 	out, _, err := shell.Run(ctx, "az", "ad", "app", "list",
 		"--display-name", "apl",
@@ -119,13 +128,10 @@ func runMicrosoft(
 	}
 	var apps []azAppListEntry
 	if out != "" {
-		// Tolerate empty bodies.
 		if err := json.Unmarshal([]byte(out), &apps); err != nil {
-			// Treat as no apps.
 			apps = nil
 		}
 	}
-	// Filter to those starting with "apl-" or named "apl".
 	var existing []azAppListEntry
 	for _, a := range apps {
 		if len(a.DisplayName) >= 3 && a.DisplayName[:3] == "apl" {
@@ -135,20 +141,14 @@ func runMicrosoft(
 
 	var appID string
 	if len(existing) > 0 {
-		opts := make([]string, 0, len(existing)+1)
-		for _, a := range existing {
-			opts = append(opts, fmt.Sprintf("%s (%s)", a.DisplayName, a.AppID))
-		}
-		opts = append(opts, "Create a new one")
-		choice := prompter.Pick("Existing apl app registrations in this tenant:", opts)
-		if choice < len(existing) {
-			appID = existing[choice].AppID
-			fmt.Fprintf(stdout, "→ reusing %s (%s)\n", existing[choice].DisplayName, appID)
-		}
+		// Always reuse an existing apl-* registration — avoids creating stale
+		// duplicates when `apl setup ms` is re-run. To create a fresh one,
+		// delete the old registration from Azure first.
+		appID = existing[0].AppID
+		fmt.Fprintf(stdout, "→ reusing %s (%s)\n", existing[0].DisplayName, appID)
 	}
 
 	if appID == "" {
-		// Create new app.
 		displayName := generateAppDisplayName()
 		fmt.Fprintf(stdout, "→ creating app registration %s\n", displayName)
 		out, serr, err := shell.Run(ctx, "az", "ad", "app", "create",
@@ -169,23 +169,110 @@ func runMicrosoft(
 		appID = created.AppID
 	}
 
-	// Grant delegated Graph permissions.
-	for _, p := range graphDelegatedPermissions {
+	// Grant delegated Graph permissions using GUIDs looked up from the
+	// service principal.
+	scopeCount := 0
+	for _, name := range defaultGraphDelegatedScopes {
+		guid, ok := delegated[name]
+		if !ok {
+			return config.ProviderConfig{}, fmt.Errorf("%w: Graph delegated scope %q not found in service principal", ErrProviderFailure, name)
+		}
 		if _, serr, err := shell.Run(ctx, "az", "ad", "app", "permission", "add",
 			"--id", appID,
 			"--api", graphAPIResourceID,
-			"--api-permissions", p.GUID+"=Scope"); err != nil {
-			return config.ProviderConfig{}, fmt.Errorf("%w: permission add %s: %v\n%s", ErrProviderFailure, p.Name, err, serr)
+			"--api-permissions", guid+"=Scope"); err != nil {
+			return config.ProviderConfig{}, fmt.Errorf("%w: permission add %s: %v\n%s", ErrProviderFailure, name, err, serr)
+		}
+		scopeCount++
+	}
+
+	// Opt-in admin-consent scope — may be delegated or app-role.
+	if includeRecording {
+		guid, assignType, ok := lookupOptionalScope(optInAdminConsentScope, delegated, appRoles)
+		if !ok {
+			fmt.Fprintf(stderr, "warning: %s not exposed by current Graph SP; skipping\n", optInAdminConsentScope)
+		} else {
+			if _, serr, err := shell.Run(ctx, "az", "ad", "app", "permission", "add",
+				"--id", appID,
+				"--api", graphAPIResourceID,
+				"--api-permissions", guid+"="+assignType); err != nil {
+				return config.ProviderConfig{}, fmt.Errorf("%w: permission add %s: %v\n%s", ErrProviderFailure, optInAdminConsentScope, err, serr)
+			}
+			scopeCount++
+			fmt.Fprintf(stderr,
+				"note: %s requires tenant admin consent. As tenant admin, run:\n    az ad app permission admin-consent --id %s\n",
+				optInAdminConsentScope, appID)
 		}
 	}
 
-	fmt.Fprintf(stdout, "✓ Microsoft configured\n    appId: %s\n    tenant: common\n    scopes: %d delegated Graph permissions\n",
-		appID, len(graphDelegatedPermissions))
+	fmt.Fprintf(stdout, "✓ Microsoft configured\n    appId: %s\n    tenant: common\n    scopes: %d Graph permissions\n",
+		appID, scopeCount)
 
 	return config.ProviderConfig{
 		ClientID: appID,
 		Tenant:   "common",
 	}, nil
+}
+
+// fetchGraphPermissions runs `az ad sp show` on the Graph service principal
+// and returns two name→GUID maps: delegated (oauth2PermissionScopes) and
+// app-only roles (appRoles).
+func fetchGraphPermissions(ctx context.Context, shell Shell) (delegated, appRoles map[string]string, err error) {
+	// Delegated scopes.
+	out, serr, err := shell.Run(ctx, "az", "ad", "sp", "show",
+		"--id", graphAPIResourceID,
+		"--query", "oauth2PermissionScopes[].{name:value, id:id, type:type}",
+		"-o", "json")
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: az ad sp show oauth2PermissionScopes: %v\n%s", ErrProviderFailure, err, serr)
+	}
+	delegated = map[string]string{}
+	if out != "" {
+		var list []graphPermScope
+		if jerr := json.Unmarshal([]byte(out), &list); jerr != nil {
+			return nil, nil, fmt.Errorf("%w: parse oauth2PermissionScopes: %v", ErrProviderFailure, jerr)
+		}
+		for _, s := range list {
+			if s.Name != "" && s.ID != "" {
+				delegated[s.Name] = s.ID
+			}
+		}
+	}
+
+	// App roles (for scopes like OnlineMeetingRecording.Read.All that may be
+	// application-only rather than delegated).
+	out, serr, err = shell.Run(ctx, "az", "ad", "sp", "show",
+		"--id", graphAPIResourceID,
+		"--query", "appRoles[].{name:value, id:id, type:\"Role\"}",
+		"-o", "json")
+	if err != nil {
+		// Non-fatal: app roles lookup is only used for optional scopes.
+		return delegated, map[string]string{}, nil
+	}
+	appRoles = map[string]string{}
+	if out != "" {
+		var list []graphPermScope
+		if jerr := json.Unmarshal([]byte(out), &list); jerr == nil {
+			for _, s := range list {
+				if s.Name != "" && s.ID != "" {
+					appRoles[s.Name] = s.ID
+				}
+			}
+		}
+	}
+	return delegated, appRoles, nil
+}
+
+// lookupOptionalScope checks delegated first, then app-role. Returns the
+// GUID, the az --api-permissions assignment type ("Scope" or "Role"), and ok.
+func lookupOptionalScope(name string, delegated, appRoles map[string]string) (string, string, bool) {
+	if g, ok := delegated[name]; ok {
+		return g, "Scope", true
+	}
+	if g, ok := appRoles[name]; ok {
+		return g, "Role", true
+	}
+	return "", "", false
 }
 
 func generateAppDisplayName() string {

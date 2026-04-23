@@ -43,6 +43,24 @@ func NewMicrosoft(cfg config.ProviderConfig, opts ...Option) *Microsoft {
 
 func (m *Microsoft) Name() string { return "ms" }
 
+// DefaultScopes returns the full default Graph scope set granted on setup.
+// Used by `apl login` when the caller does not pass --scope.
+func (m *Microsoft) DefaultScopes() []string {
+	return []string{
+		"openid",
+		"email",
+		"profile",
+		"offline_access",
+		"User.Read",
+		"Mail.ReadWrite",
+		"Mail.Send",
+		"Calendars.ReadWrite",
+		"Chat.ReadWrite",
+		"ChatMessage.Send",
+		"OnlineMeetings.Read",
+	}
+}
+
 func (m *Microsoft) tenantFor(opts LoginOpts) string {
 	if opts.Tenant != "" {
 		return opts.Tenant
@@ -127,8 +145,9 @@ func (m *Microsoft) Login(ctx context.Context, label string, opts LoginOpts) (*s
 	}
 	scopes := opts.Scopes
 	if len(scopes) == 0 {
-		scopes = []string{"openid", "profile", "User.Read"}
+		scopes = m.DefaultScopes()
 	}
+	scopes = ensureOIDC(scopes)
 	scopes = m.normalizeScopes(scopes)
 	tenant := m.tenantFor(opts)
 	flowCfg := oauth.FlowConfig{
@@ -193,6 +212,15 @@ func (m *Microsoft) Token(ctx context.Context, rec *store.TokenRecord, scope str
 		if !hasScope(rec.Scopes, s) {
 			return "", nil, fmt.Errorf("%w: %s", ErrScopeNotGranted, scope)
 		}
+	}
+	return m.Refresh(ctx, rec)
+}
+
+// Refresh returns the cached access token if fresh, otherwise rotates it
+// via refresh_token. It does NOT check scope — use Token for that.
+func (m *Microsoft) Refresh(ctx context.Context, rec *store.TokenRecord) (string, *store.TokenRecord, error) {
+	if rec == nil {
+		return "", nil, fmt.Errorf("ms: nil record")
 	}
 	now := m.now()
 	if rec.ExpiresAt.Sub(now) > 30*time.Second {

@@ -118,6 +118,40 @@ func NewGoogle(cfg config.ProviderConfig, opts ...Option) *Google {
 
 func (g *Google) Name() string { return "google" }
 
+// DefaultScopes returns the full default scope set granted on setup.
+// Used by `apl login` when the caller does not pass --scope.
+func (g *Google) DefaultScopes() []string {
+	return []string{
+		"openid",
+		"email",
+		"profile",
+		"https://www.googleapis.com/auth/gmail.modify",
+		"https://www.googleapis.com/auth/calendar",
+		"https://www.googleapis.com/auth/contacts.readonly",
+	}
+}
+
+// ensureOIDC prepends openid/email/profile if any are missing, preserving
+// caller ordering for the rest. OIDC scopes must always be requested so
+// the ID token carries identity claims.
+func ensureOIDC(scopes []string) []string {
+	want := []string{"openid", "email", "profile"}
+	have := map[string]bool{}
+	for _, s := range scopes {
+		have[s] = true
+	}
+	var prefix []string
+	for _, w := range want {
+		if !have[w] {
+			prefix = append(prefix, w)
+		}
+	}
+	if len(prefix) == 0 {
+		return scopes
+	}
+	return append(prefix, scopes...)
+}
+
 // ExpandScopes resolves aliases. URIs (containing "://") pass through.
 func (g *Google) ExpandScopes(aliases []string) ([]string, error) {
 	out := make([]string, 0, len(aliases))
@@ -168,8 +202,9 @@ func (g *Google) Login(ctx context.Context, label string, opts LoginOpts) (*stor
 	}
 	scopes := opts.Scopes
 	if len(scopes) == 0 {
-		scopes = []string{"openid", "email", "profile"}
+		scopes = g.DefaultScopes()
 	}
+	scopes = ensureOIDC(scopes)
 	flowCfg := oauth.FlowConfig{
 		Endpoint: oauth.EndpointConfig{
 			TokenURL: g.tokenURL,
@@ -228,11 +263,19 @@ func (g *Google) Token(ctx context.Context, rec *store.TokenRecord, scope string
 			return "", nil, fmt.Errorf("%w: %s", ErrScopeNotGranted, scope)
 		}
 	}
+	return g.Refresh(ctx, rec)
+}
+
+// Refresh returns the cached access token if fresh, otherwise rotates it
+// via refresh_token. It does NOT check scope — use Token for that.
+func (g *Google) Refresh(ctx context.Context, rec *store.TokenRecord) (string, *store.TokenRecord, error) {
+	if rec == nil {
+		return "", nil, fmt.Errorf("google: nil record")
+	}
 	now := g.now()
 	if rec.ExpiresAt.Sub(now) > 30*time.Second {
 		return rec.AccessToken, rec, nil
 	}
-	// Refresh.
 	ep := oauth.EndpointConfig{TokenURL: g.tokenURL, ClientID: g.cfg.ClientID}
 	tr, err := oauth.Refresh(ctx, ep, rec.RefreshToken, rec.Scopes)
 	if err != nil {

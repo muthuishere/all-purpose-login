@@ -10,12 +10,14 @@ import (
 
 // fakeProvider is a test double for provider.Provider.
 type fakeProvider struct {
-	name       string
-	loginFn    func(ctx context.Context, label string, opts provider.LoginOpts) (*store.TokenRecord, error)
-	tokenFn    func(ctx context.Context, rec *store.TokenRecord, scope string) (string, *store.TokenRecord, error)
-	logoutFn   func(ctx context.Context, rec *store.TokenRecord) error
-	expandFn   func(aliases []string) ([]string, error)
-	expandPass bool // if true, aliases returned unchanged
+	name        string
+	loginFn     func(ctx context.Context, label string, opts provider.LoginOpts) (*store.TokenRecord, error)
+	tokenFn     func(ctx context.Context, rec *store.TokenRecord, scope string) (string, *store.TokenRecord, error)
+	refreshFn   func(ctx context.Context, rec *store.TokenRecord) (string, *store.TokenRecord, error)
+	logoutFn    func(ctx context.Context, rec *store.TokenRecord) error
+	expandFn    func(aliases []string) ([]string, error)
+	defaults    []string
+	expandPass  bool // if true, aliases returned unchanged
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -30,6 +32,15 @@ func (f *fakeProvider) Token(ctx context.Context, rec *store.TokenRecord, scope 
 		return f.tokenFn(ctx, rec, scope)
 	}
 	return rec.AccessToken, rec, nil
+}
+func (f *fakeProvider) Refresh(ctx context.Context, rec *store.TokenRecord) (string, *store.TokenRecord, error) {
+	if f.refreshFn != nil {
+		return f.refreshFn(ctx, rec)
+	}
+	return rec.AccessToken, rec, nil
+}
+func (f *fakeProvider) DefaultScopes() []string {
+	return f.defaults
 }
 func (f *fakeProvider) Logout(ctx context.Context, rec *store.TokenRecord) error {
 	if f.logoutFn != nil {
