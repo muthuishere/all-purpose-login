@@ -220,6 +220,21 @@ func runGoogle(
 		fmt.Fprintln(stdout, "✓ OAuth consent brand created via gcloud alpha iap oauth-brands")
 	}
 
+	// Brand already configured? Offer a fast-path: paste an existing Client ID
+	// and skip the entire walkthrough. Detection is best-effort — `oauth-brands
+	// list` returns a non-empty list when the project has any OAuth brand
+	// (which means the consent screen, scopes, test users were configured in a
+	// previous run or via the console).
+	if !brandAuto {
+		if out, _, lerr := shell.Run(ctx, "gcloud", "alpha", "iap", "oauth-brands", "list",
+			"--project="+projectID, "--format=value(name)"); lerr == nil && strings.TrimSpace(out) != "" {
+			fmt.Fprintln(stdout, "\n→ this project already has an OAuth brand configured")
+			if prompter.Confirm("Do you already have a Client ID you want to reuse?") {
+				return googleClientIDLoop(ctx, prompter, validator, projectID, stdout, stderr)
+			}
+		}
+	}
+
 	// Google's "Auth Platform" UI URLs (new, replaces the old
 	// /apis/credentials/consent + /apis/credentials paths).
 	brandURL := fmt.Sprintf("https://console.cloud.google.com/auth/overview?project=%s", projectID)
@@ -333,28 +348,34 @@ A dialog shows your Client ID and Client secret. Copy the Client ID.
 		return config.ProviderConfig{}, err
 	}
 
-	// Client-ID loop. Accepts: raw client_id, pasted JSON blob, or path to a
-	// downloaded client-secret JSON file (drag-drop from Finder works).
+	return googleClientIDLoop(ctx, prompter, validator, projectID, stdout, stderr)
+}
+
+// googleClientIDLoop prompts the user for a Client ID (raw, JSON blob, or
+// downloaded JSON file path), validates via the injected validator, and
+// returns a ProviderConfig on success.
+func googleClientIDLoop(
+	ctx context.Context,
+	prompter Prompter,
+	validator Validator,
+	projectID string,
+	stdout, stderr io.Writer,
+) (config.ProviderConfig, error) {
 	var clientID string
 	for attempts := 0; attempts < 3; attempts++ {
 		raw := prompter.Input("Paste Client ID, JSON, or path to downloaded JSON file: ")
 		raw = strings.TrimSpace(raw)
-		// Strip shell-style surrounding quotes if someone drag-dropped a path
-		// with spaces (macOS Finder drops paths as 'Volumes/..' or "Vol..").
 		raw = strings.Trim(raw, "'\"")
-		// Expand leading ~.
 		if strings.HasPrefix(raw, "~/") {
 			if u, uerr := user.Current(); uerr == nil && u.HomeDir != "" {
 				raw = u.HomeDir + raw[1:]
 			}
 		}
-		// If the input points at an existing file, read its contents.
 		if !strings.HasPrefix(raw, "{") && !strings.Contains(raw, "apps.googleusercontent.com") {
 			if body, rerr := os.ReadFile(raw); rerr == nil {
 				raw = strings.TrimSpace(string(body))
 			}
 		}
-		// If we now have JSON, extract client_id.
 		if strings.HasPrefix(raw, "{") {
 			var m map[string]any
 			if err := json.Unmarshal([]byte(raw), &m); err == nil {
@@ -371,7 +392,6 @@ A dialog shows your Client ID and Client secret. Copy the Client ID.
 			fmt.Fprintf(stderr, "✗ client ID format invalid (expected <digits>-<hex>.apps.googleusercontent.com)\n")
 			continue
 		}
-		// Validate via OAuth round-trip.
 		if err := validator.Validate(ctx, raw); err != nil {
 			fmt.Fprintf(stderr, "✗ OAuth round-trip failed: %v\n", err)
 			if !prompter.Confirm("Try again?") {
@@ -385,7 +405,6 @@ A dialog shows your Client ID and Client secret. Copy the Client ID.
 	if clientID == "" {
 		return config.ProviderConfig{}, fmt.Errorf("%w: failed to obtain valid client ID after 3 attempts", ErrProviderFailure)
 	}
-
 	fmt.Fprintf(stdout, "✓ Google configured\n    project: %s\n    client: %s\n", projectID, clientID)
 	return config.ProviderConfig{
 		ClientID:  clientID,
