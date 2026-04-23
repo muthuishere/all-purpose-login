@@ -61,3 +61,9 @@ tasks:
     deps: [build]
     cmds:
       - ./tests/e2e/ms_smoke.sh {{.CLI_ARGS}}
+
+  e2e:google:
+    desc: "Run the Google end-to-end smoke script (needs gcloud auth + apl setup google done)."
+    deps: [build]
+    cmds:
+      - ./tests/e2e/google_smoke.sh {{.CLI_ARGS}}

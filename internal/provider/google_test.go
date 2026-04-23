@@ -159,6 +159,34 @@ func TestGoogle_Logout_CallsRevoke(t *testing.T) {
 	}
 }
 
+func TestGoogle_DefaultScopes_IncludesDriveReadonly(t *testing.T) {
+	g := NewGoogle(config.ProviderConfig{ClientID: "x"})
+	scopes := g.DefaultScopes()
+	want := "https://www.googleapis.com/auth/drive.readonly"
+	found := false
+	for _, s := range scopes {
+		if s == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("DefaultScopes() missing %q; got %v", want, scopes)
+	}
+}
+
+func TestGoogle_ExpandScopes_DriveReadonly(t *testing.T) {
+	g := NewGoogle(config.ProviderConfig{ClientID: "x"})
+	got, err := g.ExpandScopes([]string{"drive.readonly"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"https://www.googleapis.com/auth/drive.readonly"}
+	if !strSliceEq(got, want) {
+		t.Errorf("got %v; want %v", got, want)
+	}
+}
+
 func strSliceEq(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

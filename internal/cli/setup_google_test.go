@@ -81,7 +81,8 @@ func TestGoogle_ReuseExistingProject(t *testing.T) {
 	joined := strings.Join(svc.Args, " ")
 	if !strings.Contains(joined, "gmail.googleapis.com") ||
 		!strings.Contains(joined, "calendar-json.googleapis.com") ||
-		!strings.Contains(joined, "people.googleapis.com") {
+		!strings.Contains(joined, "people.googleapis.com") ||
+		!strings.Contains(joined, "drive.googleapis.com") {
 		t.Fatalf("services enable missing expected APIs, args=%v", svc.Args)
 	}
 }
@@ -171,5 +172,8 @@ func TestGoogle_WalkthroughIncludesProjectURL(t *testing.T) {
 	}
 	if !strings.Contains(out, "console.cloud.google.com") {
 		t.Errorf("walkthrough should reference GCP console URL")
+	}
+	if !strings.Contains(out, "https://www.googleapis.com/auth/drive.readonly") {
+		t.Errorf("walkthrough should list drive.readonly scope")
 	}
 }

@@ -125,11 +125,12 @@ func runGoogle(
 	}
 
 	// Enable APIs.
-	fmt.Fprintln(stdout, "→ enabling Gmail, Calendar, People APIs")
+	fmt.Fprintln(stdout, "→ enabling Gmail, Calendar, People, Drive APIs")
 	if _, serr, err := shell.Run(ctx, "gcloud", "services", "enable",
 		"gmail.googleapis.com",
 		"calendar-json.googleapis.com",
 		"people.googleapis.com",
+		"drive.googleapis.com",
 		"--project="+projectID); err != nil {
 		return config.ProviderConfig{}, fmt.Errorf("%w: gcloud services enable: %v\n%s", ErrProviderFailure, err, serr)
 	}
@@ -206,6 +207,7 @@ On the Scopes page, click "ADD OR REMOVE SCOPES" and add:
   https://www.googleapis.com/auth/gmail.modify
   https://www.googleapis.com/auth/calendar
   https://www.googleapis.com/auth/contacts.readonly
+  https://www.googleapis.com/auth/drive.readonly
 
 Click SAVE AND CONTINUE through each page, then PUBLISH or leave in Testing.
 
