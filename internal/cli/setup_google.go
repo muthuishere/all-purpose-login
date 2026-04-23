@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/muthuishere/all-purpose-login/internal/config"
+	"github.com/muthuishere/all-purpose-login/internal/oauth"
 )
 
 // googleClientIDRe validates Desktop-app Google Client IDs.
@@ -205,9 +206,85 @@ func runGoogle(
 		return config.ProviderConfig{}, fmt.Errorf("%w: gcloud services enable: %v\n%s", ErrProviderFailure, err, serr)
 	}
 
-	// Console walkthrough.
-	printGoogleWalkthrough(stdout, projectID)
-	if err := prompter.Wait("Press ENTER when the consent screen is saved..."); err != nil {
+	// Try to headlessly create the project's OAuth consent brand via
+	// `gcloud alpha iap oauth-brands create`. When this works, the
+	// consent-screen UI step can be skipped entirely. It fails silently on:
+	// brand already exists, caller lacks IAP admin, alpha component missing.
+	brandAuto := false
+	if _, _, err := shell.Run(ctx, "gcloud", "alpha", "iap", "oauth-brands", "create",
+		"--application_title", "apl (local)",
+		"--support_email", activeAccount,
+		"--project="+projectID); err == nil {
+		brandAuto = true
+		fmt.Fprintln(stdout, "✓ OAuth consent brand created via gcloud alpha iap oauth-brands")
+	}
+
+	consentURL := fmt.Sprintf("https://console.cloud.google.com/apis/credentials/consent?project=%s", projectID)
+	credURL := fmt.Sprintf("https://console.cloud.google.com/apis/credentials?project=%s", projectID)
+
+	// Step 1: configure OAuth consent screen — only if we couldn't auto-create.
+	if !brandAuto {
+		fmt.Fprintf(stdout, `
+─────────────────────────────────────────────────────────────────
+Step 1 of 2 — Configure the OAuth consent screen
+─────────────────────────────────────────────────────────────────
+Set:
+  User Type:           External
+  App name:            apl (local)
+  User support email:  %s
+  Developer contact:   %s
+  Test users:          %s
+
+On the Scopes page, click "ADD OR REMOVE SCOPES" and add:
+  openid
+  https://www.googleapis.com/auth/userinfo.email
+  https://www.googleapis.com/auth/userinfo.profile
+  https://www.googleapis.com/auth/gmail.modify
+  https://www.googleapis.com/auth/calendar
+  https://www.googleapis.com/auth/contacts.readonly
+  https://www.googleapis.com/auth/drive.readonly
+
+Click SAVE AND CONTINUE through each page, then PUBLISH or leave in Testing.
+
+`, activeAccount, activeAccount, activeAccount)
+
+		if prompter.Confirm("Open the consent screen in your browser now?") {
+			if err := oauth.Open(consentURL); err != nil {
+				fmt.Fprintf(stderr, "could not open browser: %v\n  Open this URL manually: %s\n", err, consentURL)
+			}
+		} else {
+			fmt.Fprintf(stdout, "Open manually: %s\n", consentURL)
+		}
+		if err := prompter.Wait("Press ENTER when the consent screen is saved..."); err != nil {
+			return config.ProviderConfig{}, err
+		}
+	}
+
+	// Step 2: create the OAuth 2.0 Desktop Client ID.
+	stepNum := 2
+	if brandAuto {
+		stepNum = 1
+	}
+	fmt.Fprintf(stdout, `
+─────────────────────────────────────────────────────────────────
+Step %d — Create OAuth 2.0 Client ID
+─────────────────────────────────────────────────────────────────
+Click: + CREATE CREDENTIALS → OAuth client ID
+  Application type:  Desktop app
+  Name:              apl-desktop
+
+Click CREATE. A dialog shows your Client ID and Client secret.
+
+`, stepNum)
+
+	if prompter.Confirm("Open the credentials page in your browser now?") {
+		if err := oauth.Open(credURL); err != nil {
+			fmt.Fprintf(stderr, "could not open browser: %v\n  Open this URL manually: %s\n", err, credURL)
+		}
+	} else {
+		fmt.Fprintf(stdout, "Open manually: %s\n", credURL)
+	}
+	if err := prompter.Wait("Press ENTER when you've clicked CREATE and have the Client ID..."); err != nil {
 		return config.ProviderConfig{}, err
 	}
 
@@ -253,51 +330,6 @@ func runGoogle(
 		ClientID:  clientID,
 		ProjectID: projectID,
 	}, nil
-}
-
-func printGoogleWalkthrough(w io.Writer, projectID string) {
-	fmt.Fprintf(w, `─────────────────────────────────────────────────────────────────
-Step 1 of 3 — Configure the OAuth consent screen
-─────────────────────────────────────────────────────────────────
-Open this URL in your browser:
-
-  https://console.cloud.google.com/apis/credentials/consent?project=%s
-
-Set the following:
-  User Type:         External
-  App name:          apl (local)
-  User support email: <your email>
-  Developer contact:  <your email>
-  Test users:        <your email>
-
-On the Scopes page, click "ADD OR REMOVE SCOPES" and add:
-  openid
-  https://www.googleapis.com/auth/userinfo.email
-  https://www.googleapis.com/auth/userinfo.profile
-  https://www.googleapis.com/auth/gmail.modify
-  https://www.googleapis.com/auth/calendar
-  https://www.googleapis.com/auth/contacts.readonly
-  https://www.googleapis.com/auth/drive.readonly
-
-Click SAVE AND CONTINUE through each page, then PUBLISH or leave in Testing.
-
-─────────────────────────────────────────────────────────────────
-Step 2 of 3 — Create OAuth 2.0 Client ID
-─────────────────────────────────────────────────────────────────
-Open:
-
-  https://console.cloud.google.com/apis/credentials?project=%s
-
-Click: + CREATE CREDENTIALS → OAuth client ID
-  Application type:  Desktop app
-  Name:              apl-desktop
-
-Click CREATE. A dialog shows your Client ID and Client secret.
-
-─────────────────────────────────────────────────────────────────
-Step 3 of 3 — Paste the Client ID below
-─────────────────────────────────────────────────────────────────
-`, projectID, projectID)
 }
 
 func generateProjectID() string {

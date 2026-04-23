@@ -255,6 +255,9 @@ func TestGoogle_WalkthroughIncludesProjectURL(t *testing.T) {
 	fs.respond("gcloud config", fakeResp{Stdout: "my-current-project\n"})
 	fs.respond("gcloud projects", fakeResp{Stdout: `[{"projectId":"apl-muthu-abc","name":"x"}]`})
 	fs.respond("gcloud services", fakeResp{Stdout: ""})
+	// Simulate common failure mode: user lacks IAP admin — brand auto-create
+	// fails so Step 1 is printed in full with the scope list.
+	fs.respond("gcloud alpha", fakeResp{Stderr: "permission denied", Err: errors.New("exit 1")})
 
 	var stdout bytes.Buffer
 	p := &fakePrompter{
