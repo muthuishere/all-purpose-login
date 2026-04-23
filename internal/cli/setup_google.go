@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/user"
 	"regexp"
 	"sort"
@@ -332,12 +333,28 @@ A dialog shows your Client ID and Client secret. Copy the Client ID.
 		return config.ProviderConfig{}, err
 	}
 
-	// Client-ID loop.
+	// Client-ID loop. Accepts: raw client_id, pasted JSON blob, or path to a
+	// downloaded client-secret JSON file (drag-drop from Finder works).
 	var clientID string
 	for attempts := 0; attempts < 3; attempts++ {
-		raw := prompter.Input("Paste your OAuth Client ID: ")
+		raw := prompter.Input("Paste Client ID, JSON, or path to downloaded JSON file: ")
 		raw = strings.TrimSpace(raw)
-		// If user pasted JSON, extract client_id.
+		// Strip shell-style surrounding quotes if someone drag-dropped a path
+		// with spaces (macOS Finder drops paths as 'Volumes/..' or "Vol..").
+		raw = strings.Trim(raw, "'\"")
+		// Expand leading ~.
+		if strings.HasPrefix(raw, "~/") {
+			if u, uerr := user.Current(); uerr == nil && u.HomeDir != "" {
+				raw = u.HomeDir + raw[1:]
+			}
+		}
+		// If the input points at an existing file, read its contents.
+		if !strings.HasPrefix(raw, "{") && !strings.Contains(raw, "apps.googleusercontent.com") {
+			if body, rerr := os.ReadFile(raw); rerr == nil {
+				raw = strings.TrimSpace(string(body))
+			}
+		}
+		// If we now have JSON, extract client_id.
 		if strings.HasPrefix(raw, "{") {
 			var m map[string]any
 			if err := json.Unmarshal([]byte(raw), &m); err == nil {
