@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"os/user"
+	"sort"
+	"strings"
 
 	"github.com/muthuishere/all-purpose-login/internal/config"
 )
@@ -61,6 +63,19 @@ type azAccountShow struct {
 	} `json:"user"`
 }
 
+// azAccountListEntry mirrors `az account list --all --output json` output. We
+// only read the fields we care about.
+type azAccountListEntry struct {
+	ID       string `json:"id"` // subscription id
+	Name     string `json:"name"`
+	TenantID string `json:"tenantId"`
+	State    string `json:"state"`
+	IsDefault bool  `json:"isDefault"`
+	User     struct {
+		Name string `json:"name"`
+	} `json:"user"`
+}
+
 type azAppCreateResp struct {
 	AppID       string `json:"appId"`
 	DisplayName string `json:"displayName"`
@@ -102,6 +117,115 @@ func runMicrosoft(
 	if err := json.Unmarshal([]byte(acctOut), &acct); err != nil {
 		return config.ProviderConfig{}, fmt.Errorf("%w: parse az account show: %v", ErrProviderFailure, err)
 	}
+
+	// Account picker. List all az accounts (across tenants), dedup by
+	// user.name, filter out Disabled subscriptions, and show a picker plus a
+	// final "Sign in another tenant/account" option.
+	listOut, _, _ := shell.Run(ctx, "az", "account", "list", "--all", "--output", "json")
+	var allSubs []azAccountListEntry
+	if listOut != "" {
+		_ = json.Unmarshal([]byte(listOut), &allSubs)
+	}
+	// Filter Disabled.
+	enabled := make([]azAccountListEntry, 0, len(allSubs))
+	for _, s := range allSubs {
+		if !strings.EqualFold(s.State, "Disabled") {
+			enabled = append(enabled, s)
+		}
+	}
+	// Dedup by user.name; remember first subscription per user.
+	type userEntry struct {
+		UserName string
+		TenantID string
+		SubID    string // first Enabled sub id, may be empty
+	}
+	var users []userEntry
+	seen := map[string]int{}
+	for _, s := range enabled {
+		key := strings.ToLower(s.User.Name)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = len(users)
+		users = append(users, userEntry{
+			UserName: s.User.Name,
+			TenantID: s.TenantID,
+			SubID:    s.ID,
+		})
+	}
+	// Make sure the currently-active user is in the list (could be a tenant-
+	// level account with no subscriptions).
+	if acct.User.Name != "" {
+		if _, ok := seen[strings.ToLower(acct.User.Name)]; !ok {
+			users = append([]userEntry{{
+				UserName: acct.User.Name,
+				TenantID: acct.TenantID,
+			}}, users...)
+		}
+	}
+
+	// Build the picker: active first.
+	sort.SliceStable(users, func(i, j int) bool {
+		ai := strings.EqualFold(users[i].UserName, acct.User.Name)
+		aj := strings.EqualFold(users[j].UserName, acct.User.Name)
+		if ai != aj {
+			return ai
+		}
+		return users[i].UserName < users[j].UserName
+	})
+	acctOptions := make([]string, 0, len(users)+1)
+	for _, u := range users {
+		label := u.UserName
+		if u.TenantID != "" {
+			label += " (tenant " + u.TenantID + ")"
+		}
+		if strings.EqualFold(u.UserName, acct.User.Name) {
+			label += "  [active]"
+		}
+		acctOptions = append(acctOptions, label)
+	}
+	acctOptions = append(acctOptions, "Sign in another tenant/account")
+
+	fmt.Fprintln(stdout, "\nDetected az accounts:")
+	choice := prompter.Pick("Pick account", acctOptions)
+	if choice < 0 || choice >= len(acctOptions) {
+		return config.ProviderConfig{}, fmt.Errorf("%w: invalid account choice", ErrProviderFailure)
+	}
+
+	if choice == len(acctOptions)-1 {
+		tenant := strings.TrimSpace(prompter.Input("Tenant domain (e.g. reqsume.onmicrosoft.com, or 'common'): "))
+		if tenant == "" {
+			return config.ProviderConfig{}, fmt.Errorf("%w: empty tenant for sign-in", ErrProviderFailure)
+		}
+		fmt.Fprintf(stdout, "→ running `az login --tenant %s --allow-no-subscriptions` (browser opens)\n", tenant)
+		if err := shell.RunInteractive(ctx, "az", "login", "--tenant", tenant, "--allow-no-subscriptions"); err != nil {
+			return config.ProviderConfig{}, fmt.Errorf("%w: az login: %v", ErrNotLoggedIn, err)
+		}
+		// Re-read active identity.
+		acctOut2, _, err := shell.Run(ctx, "az", "account", "show")
+		if err != nil {
+			return config.ProviderConfig{}, fmt.Errorf("%w: az account show after login: %v", ErrProviderFailure, err)
+		}
+		if err := json.Unmarshal([]byte(acctOut2), &acct); err != nil {
+			return config.ProviderConfig{}, fmt.Errorf("%w: parse az account show: %v", ErrProviderFailure, err)
+		}
+	} else {
+		picked := users[choice]
+		if !strings.EqualFold(picked.UserName, acct.User.Name) && picked.SubID != "" {
+			if _, serr, err := shell.Run(ctx, "az", "account", "set", "--subscription", picked.SubID); err != nil {
+				return config.ProviderConfig{}, fmt.Errorf("%w: az account set: %v\n%s", ErrProviderFailure, err, serr)
+			}
+			// Refresh acct to reflect switch.
+			acctOut2, _, err := shell.Run(ctx, "az", "account", "show")
+			if err == nil {
+				_ = json.Unmarshal([]byte(acctOut2), &acct)
+			}
+		}
+	}
+
 	fmt.Fprintf(stdout, "\n  Azure signed-in user: %s\n  Subscription:         %s\n  Tenant:               %s\n\n",
 		acct.User.Name, acct.Name, acct.TenantID)
 	if !prompter.Confirm("Continue as this user?") {
@@ -139,13 +263,28 @@ func runMicrosoft(
 		}
 	}
 
+	// App-registration picker — list existing apl-* apps and a final
+	// "Create a new app registration" entry. Re-running setup can thus pick
+	// a different registration or make a fresh one.
+	appOptions := make([]string, 0, len(existing)+1)
+	for _, a := range existing {
+		appOptions = append(appOptions, fmt.Sprintf("%s  [apl]", a.DisplayName))
+	}
+	appOptions = append(appOptions, "Create a new app registration")
+
 	var appID string
-	if len(existing) > 0 {
-		// Always reuse an existing apl-* registration — avoids creating stale
-		// duplicates when `apl setup ms` is re-run. To create a fresh one,
-		// delete the old registration from Azure first.
-		appID = existing[0].AppID
-		fmt.Fprintf(stdout, "→ reusing %s (%s)\n", existing[0].DisplayName, appID)
+	if len(existing) == 0 {
+		fmt.Fprintln(stdout, "No existing apl-* app registrations in this tenant.")
+	} else {
+		fmt.Fprintln(stdout, "\nDetected apl-* app registrations in this tenant:")
+		ac := prompter.Pick("Pick app registration", appOptions)
+		if ac < 0 || ac >= len(appOptions) {
+			return config.ProviderConfig{}, fmt.Errorf("%w: invalid app-registration choice", ErrProviderFailure)
+		}
+		if ac < len(existing) {
+			appID = existing[ac].AppID
+			fmt.Fprintf(stdout, "→ using %s (%s)\n", existing[ac].DisplayName, appID)
+		}
 	}
 
 	if appID == "" {

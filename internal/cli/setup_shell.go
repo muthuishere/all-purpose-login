@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 )
 
@@ -11,6 +12,10 @@ import (
 type Shell interface {
 	// Run executes name with args, returning stdout, stderr, and any error.
 	Run(ctx context.Context, name string, args ...string) (stdout string, stderr string, err error)
+	// RunInteractive executes name with args, wiring the subprocess's stdio to
+	// the parent process's real stdin/stdout/stderr so interactive tools
+	// (gcloud auth login, az login) can prompt the user and open a browser.
+	RunInteractive(ctx context.Context, name string, args ...string) error
 	// Available reports whether name is resolvable on PATH.
 	Available(name string) bool
 }
@@ -28,6 +33,14 @@ func (realShell) Run(ctx context.Context, name string, args ...string) (string, 
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+func (realShell) RunInteractive(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func (realShell) Available(name string) bool {

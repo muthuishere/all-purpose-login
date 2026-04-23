@@ -14,13 +14,17 @@ type fakeShell struct {
 	// responses maps a matcher to a canned response. The matcher is
 	// name + " " + args[0] when args present, else name.
 	responses map[string]fakeResp
+	// interactiveResponses maps the same matcher keys to canned errors that
+	// RunInteractive should return. Unset = nil error.
+	interactiveResponses map[string]error
 	// availableCmds is the set of commands that resolve on PATH.
 	availableCmds map[string]bool
 }
 
 type fakeCall struct {
-	Name string
-	Args []string
+	Name        string
+	Args        []string
+	Interactive bool
 }
 
 type fakeResp struct {
@@ -31,8 +35,9 @@ type fakeResp struct {
 
 func newFakeShell() *fakeShell {
 	return &fakeShell{
-		responses:     map[string]fakeResp{},
-		availableCmds: map[string]bool{},
+		responses:            map[string]fakeResp{},
+		interactiveResponses: map[string]error{},
+		availableCmds:        map[string]bool{},
 	}
 }
 
@@ -63,6 +68,29 @@ func (f *fakeShell) Run(ctx context.Context, name string, args ...string) (strin
 		return r.Stdout, r.Stderr, r.Err
 	}
 	return "", "", nil
+}
+
+func (f *fakeShell) RunInteractive(ctx context.Context, name string, args ...string) error {
+	f.calls = append(f.calls, fakeCall{Name: name, Args: append([]string(nil), args...), Interactive: true})
+	if len(args) >= 3 {
+		if e, ok := f.interactiveResponses[name+" "+args[0]+" "+args[1]+" "+args[2]]; ok {
+			return e
+		}
+	}
+	if len(args) >= 2 {
+		if e, ok := f.interactiveResponses[name+" "+args[0]+" "+args[1]]; ok {
+			return e
+		}
+	}
+	if len(args) >= 1 {
+		if e, ok := f.interactiveResponses[name+" "+args[0]]; ok {
+			return e
+		}
+	}
+	if e, ok := f.interactiveResponses[name]; ok {
+		return e
+	}
+	return nil
 }
 
 func (f *fakeShell) Available(name string) bool {
@@ -136,6 +164,30 @@ func TestFakeShell_Available(t *testing.T) {
 	}
 	if !fs.Available("unset") {
 		t.Fatal("unset commands default to available in the fake")
+	}
+}
+
+func TestFakeShell_RunInteractive_Recorded(t *testing.T) {
+	fs := newFakeShell()
+	if err := fs.RunInteractive(context.Background(), "gcloud", "auth", "login", "foo@x.com"); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(fs.calls) != 1 {
+		t.Fatalf("want 1 call, got %d", len(fs.calls))
+	}
+	c := fs.calls[0]
+	if c.Name != "gcloud" || !c.Interactive {
+		t.Fatalf("want interactive gcloud call, got %+v", c)
+	}
+	if len(c.Args) != 3 || c.Args[0] != "auth" || c.Args[1] != "login" || c.Args[2] != "foo@x.com" {
+		t.Fatalf("args mismatch: %v", c.Args)
+	}
+
+	// Canned error path.
+	fs.interactiveResponses["gcloud auth"] = errors.New("boom")
+	err := fs.RunInteractive(context.Background(), "gcloud", "auth", "login", "bar@x.com")
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("want boom err, got %v", err)
 	}
 }
 

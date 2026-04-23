@@ -1,5 +1,7 @@
 # Google APIs — Reference
 
+> **Setup flow:** `apl setup google` now shows a two-step picker. First pick the gcloud account (active accounts are labelled `[active]`; choose "Sign in another account" to `gcloud auth login` a new identity in-line). Then pick the GCP project (or create a new `apl-*` one). Re-running setup lets you change either pick.
+
 Every URL `apl` has been verified against. Use these with the token from `apl login google:<handle>`.
 
 ```bash

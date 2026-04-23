@@ -95,9 +95,8 @@ func TestMicrosoft_ReuseExistingApp(t *testing.T) {
 		fakeResp{Stdout: `[{"displayName":"apl-muthu","appId":"11111111-2222-3333-4444-555555555555"}]`})
 	fs.respond("az ad app permission", fakeResp{Stdout: ""})
 
-	// prompter: confirm user, decline admin-consent opt-in.
-	// Existing registrations are now auto-reused (no picker).
-	p := &fakePrompter{confirms: []bool{true, false}}
+	// picks: [account=0, app=0]; confirms: [continue user=true, admin-consent=false]
+	p := &fakePrompter{picks: []int{0, 0}, confirms: []bool{true, false}}
 
 	pc, err := runMicrosoft(context.Background(), config.ProviderConfig{}, fs, p, &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
@@ -126,7 +125,8 @@ func TestMicrosoft_CreateNewApp(t *testing.T) {
 		fakeResp{Stdout: `{"appId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","displayName":"apl-muthu-host"}`})
 	fs.respond("az ad app permission", fakeResp{Stdout: ""})
 
-	p := &fakePrompter{confirms: []bool{true, false}}
+	// picks: [account=0]; confirms: [continue user=true, admin-consent=false]
+	p := &fakePrompter{picks: []int{0}, confirms: []bool{true, false}}
 
 	pc, err := runMicrosoft(context.Background(), config.ProviderConfig{}, fs, p, &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
@@ -178,7 +178,7 @@ func TestMicrosoft_PermissionsAddedForAllScopes(t *testing.T) {
 
 	_, err := runMicrosoft(
 		context.Background(), config.ProviderConfig{}, fs,
-		&fakePrompter{confirms: []bool{true, false}}, // confirm user, decline admin-consent
+		&fakePrompter{picks: []int{0}, confirms: []bool{true, false}}, // account=0, confirm user, decline admin-consent
 		&bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -272,7 +272,7 @@ func TestMicrosoft_OptInAdminConsentScope(t *testing.T) {
 	stderr := &bytes.Buffer{}
 	_, err := runMicrosoft(
 		context.Background(), config.ProviderConfig{}, fs,
-		&fakePrompter{confirms: []bool{true, true}}, // confirm user, ACCEPT admin-consent
+		&fakePrompter{picks: []int{0}, confirms: []bool{true, true}}, // account=0, confirm user, ACCEPT admin-consent
 		&bytes.Buffer{}, stderr)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -309,7 +309,8 @@ func TestMicrosoft_UserDeclinesAccountConfirmation(t *testing.T) {
 	fs.setAvailable("az", true)
 	fs.respond("az account", fakeResp{Stdout: `{"name":"Sub","tenantId":"t","user":{"name":"wrong@user.com"}}`})
 
-	p := &fakePrompter{confirms: []bool{false}}
+	// picks: [account=0 (wrong@user.com)], confirms: [false → decline]
+	p := &fakePrompter{picks: []int{0}, confirms: []bool{false}}
 	out := &bytes.Buffer{}
 
 	_, err := runMicrosoft(context.Background(), config.ProviderConfig{}, fs, p, out, &bytes.Buffer{})
@@ -325,6 +326,88 @@ func TestMicrosoft_UserDeclinesAccountConfirmation(t *testing.T) {
 	for _, c := range fs.calls {
 		if c.Name == "az" && len(c.Args) >= 2 && c.Args[0] == "ad" {
 			t.Fatalf("no `az ad ...` should run after decline, got %v", c.Args)
+		}
+	}
+}
+
+func TestMicrosoft_AccountPicker_SignInNew(t *testing.T) {
+	fs := newFakeShell()
+	fs.setAvailable("az", true)
+	fs.respond("az account show", fakeResp{Stdout: `{"name":"Sub","tenantId":"t","user":{"name":"u@x.com"}}`})
+	fs.respond("az account list", fakeResp{Stdout: `[]`})
+	stubGraphSP(fs)
+	fs.respond("az ad app list", fakeResp{Stdout: `[]`})
+	fs.respond("az ad app",
+		fakeResp{Stdout: `{"appId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}`})
+	fs.respond("az ad app permission", fakeResp{Stdout: ""})
+
+	// picks: [account=1 (sign-in-new)]
+	// inputs: tenant domain
+	// confirms: [continue user=true, admin-consent=false]
+	p := &fakePrompter{
+		picks:    []int{1},
+		inputs:   []string{"reqsume.onmicrosoft.com"},
+		confirms: []bool{true, false},
+	}
+	_, err := runMicrosoft(context.Background(), config.ProviderConfig{}, fs, p, &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	// Must have called interactive `az login --tenant <x> --allow-no-subscriptions`.
+	var login *fakeCall
+	for i := range fs.calls {
+		c := &fs.calls[i]
+		if c.Interactive && c.Name == "az" && len(c.Args) >= 1 && c.Args[0] == "login" {
+			login = c
+			break
+		}
+	}
+	if login == nil {
+		t.Fatal("expected interactive az login")
+	}
+	if !hasArg(login.Args, "--tenant") || !hasArg(login.Args, "reqsume.onmicrosoft.com") ||
+		!hasArg(login.Args, "--allow-no-subscriptions") {
+		t.Fatalf("az login args mismatch: %v", login.Args)
+	}
+
+	// Must have re-read az account show at least twice (pre-picker + post-login).
+	showCount := 0
+	for _, c := range fs.calls {
+		if c.Name == "az" && len(c.Args) >= 2 && c.Args[0] == "account" && c.Args[1] == "show" {
+			showCount++
+		}
+	}
+	if showCount < 2 {
+		t.Fatalf("expected >=2 `az account show` calls, got %d", showCount)
+	}
+}
+
+func TestMicrosoft_AppRegPicker_ExistingSelected(t *testing.T) {
+	fs := newFakeShell()
+	fs.setAvailable("az", true)
+	fs.respond("az account show", fakeResp{Stdout: `{"user":{"name":"u"}}`})
+	fs.respond("az account list", fakeResp{Stdout: `[]`})
+	stubGraphSP(fs)
+	// Two apl-* apps — pick the second one.
+	fs.respond("az ad app list", fakeResp{Stdout: `[
+	  {"displayName":"apl-first","appId":"11111111-1111-1111-1111-111111111111"},
+	  {"displayName":"apl-second","appId":"22222222-2222-2222-2222-222222222222"}
+	]`})
+	fs.respond("az ad app permission", fakeResp{Stdout: ""})
+
+	// picks: [account=0, app=1 (apl-second)]
+	p := &fakePrompter{picks: []int{0, 1}, confirms: []bool{true, false}}
+	pc, err := runMicrosoft(context.Background(), config.ProviderConfig{}, fs, p, &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if pc.ClientID != "22222222-2222-2222-2222-222222222222" {
+		t.Fatalf("want second app picked, got %q", pc.ClientID)
+	}
+	for _, c := range fs.calls {
+		if c.Name == "az" && len(c.Args) >= 3 && c.Args[0] == "ad" && c.Args[1] == "app" && c.Args[2] == "create" {
+			t.Fatalf("should not have called az ad app create when picking existing")
 		}
 	}
 }

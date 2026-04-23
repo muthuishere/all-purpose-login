@@ -1,5 +1,7 @@
 # Microsoft Graph URLs — Reference
 
+> **Setup flow:** `apl setup ms` now shows a two-step picker. First pick the az account/tenant (dedup'd by `user.name`, active account labelled `[active]`; choose "Sign in another tenant/account" to run `az login --tenant <domain> --allow-no-subscriptions` in-line). Then pick an existing `apl-*` app registration or create a new one. Re-running setup lets you change either pick.
+
 Every URL `apl` has been verified against. Use these with the token from `apl login ms:<handle>`.
 
 ```bash

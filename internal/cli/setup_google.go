@@ -44,7 +44,8 @@ func runGoogle(
 			ErrMissingCLI)
 	}
 
-	// Preflight: logged in? Use auth list --format=json.
+	// List gcloud credentialed accounts and let the user pick — or sign in a
+	// new one. An empty list is allowed; the picker collapses to sign-in.
 	out, _, err := shell.Run(ctx, "gcloud", "auth", "list", "--format=json")
 	if err != nil {
 		return config.ProviderConfig{}, fmt.Errorf(
@@ -60,11 +61,58 @@ func runGoogle(
 			break
 		}
 	}
-	if activeAccount == "" {
-		return config.ProviderConfig{}, fmt.Errorf(
-			"%w: no active gcloud account\n    Run: gcloud auth login",
-			ErrNotLoggedIn)
+
+	// Build account picker: existing accounts (active first), then "Sign in".
+	sort.SliceStable(accounts, func(i, j int) bool {
+		ai := strings.EqualFold(accounts[i].Status, "ACTIVE")
+		aj := strings.EqualFold(accounts[j].Status, "ACTIVE")
+		if ai != aj {
+			return ai
+		}
+		return accounts[i].Account < accounts[j].Account
+	})
+	acctOptions := make([]string, 0, len(accounts)+1)
+	for _, a := range accounts {
+		label := a.Account
+		if strings.EqualFold(a.Status, "ACTIVE") {
+			label += "  [active]"
+		}
+		acctOptions = append(acctOptions, label)
 	}
+	acctOptions = append(acctOptions, "Sign in another account")
+
+	fmt.Fprintln(stdout, "\nDetected gcloud accounts:")
+	choice := prompter.Pick("Pick account", acctOptions)
+	if choice < 0 || choice >= len(acctOptions) {
+		return config.ProviderConfig{}, fmt.Errorf("%w: invalid account choice", ErrProviderFailure)
+	}
+
+	var chosen string
+	if choice == len(acctOptions)-1 {
+		// Sign in a new account interactively.
+		email := strings.TrimSpace(prompter.Input("Email to sign in: "))
+		if email == "" {
+			return config.ProviderConfig{}, fmt.Errorf("%w: empty email for sign-in", ErrProviderFailure)
+		}
+		fmt.Fprintf(stdout, "→ running `gcloud auth login %s` (browser opens)\n", email)
+		if err := shell.RunInteractive(ctx, "gcloud", "auth", "login", email); err != nil {
+			return config.ProviderConfig{}, fmt.Errorf("%w: gcloud auth login: %v", ErrNotLoggedIn, err)
+		}
+		if _, serr, err := shell.Run(ctx, "gcloud", "config", "set", "account", email); err != nil {
+			return config.ProviderConfig{}, fmt.Errorf("%w: gcloud config set account: %v\n%s", ErrProviderFailure, err, serr)
+		}
+		fmt.Fprintf(stdout, "✓ signed in as %s\n→ set as active gcloud account\n", email)
+		chosen = email
+	} else {
+		chosen = accounts[choice].Account
+		if !strings.EqualFold(accounts[choice].Status, "ACTIVE") {
+			if _, serr, err := shell.Run(ctx, "gcloud", "config", "set", "account", chosen); err != nil {
+				return config.ProviderConfig{}, fmt.Errorf("%w: gcloud config set account: %v\n%s", ErrProviderFailure, err, serr)
+			}
+		}
+	}
+	activeAccount = chosen
+
 	// Fetch the project currently set in gcloud config for context.
 	curProjectOut, _, _ := shell.Run(ctx, "gcloud", "config", "get-value", "project")
 	curProject := strings.TrimSpace(curProjectOut)
@@ -73,9 +121,6 @@ func runGoogle(
 	}
 	fmt.Fprintf(stdout, "\n  Google signed-in account: %s\n  Active project:           %s\n\n",
 		activeAccount, curProject)
-	if !prompter.Confirm("Continue as this account?") {
-		return config.ProviderConfig{}, fmt.Errorf("%w: cancelled by user (run `gcloud auth login` or `gcloud config set account <email>` to switch)", ErrNotLoggedIn)
-	}
 
 	// List projects.
 	out, _, err = shell.Run(ctx, "gcloud", "projects", "list", "--format=json")
@@ -85,33 +130,58 @@ func runGoogle(
 	var projects []gcloudProject
 	_ = json.Unmarshal([]byte(out), &projects)
 
-	// Sort: apl-* first, then alphabetic.
+	// Sort: active first, then apl-*, then alphabetic.
 	sort.SliceStable(projects, func(i, j int) bool {
-		ai := strings.HasPrefix(projects[i].ProjectID, "apl-")
-		aj := strings.HasPrefix(projects[j].ProjectID, "apl-")
+		ai := projects[i].ProjectID == curProject
+		aj := projects[j].ProjectID == curProject
 		if ai != aj {
 			return ai
+		}
+		bi := strings.HasPrefix(projects[i].ProjectID, "apl-")
+		bj := strings.HasPrefix(projects[j].ProjectID, "apl-")
+		if bi != bj {
+			return bi
 		}
 		return projects[i].ProjectID < projects[j].ProjectID
 	})
 
-	var aplProjects []gcloudProject
+	// Build a picker: all reachable projects, plus a "Create new apl-* project"
+	// entry at the end. Active project gets a [current] suffix. The user may
+	// reuse any existing project — setup will enable the required APIs on it
+	// and wire the consent-screen walkthrough to it.
+	options := make([]string, 0, len(projects)+1)
+	choices := make([]string, 0, len(projects)+1)
 	for _, p := range projects {
-		if strings.HasPrefix(p.ProjectID, "apl-") {
-			aplProjects = append(aplProjects, p)
+		label := p.ProjectID
+		if p.Name != "" && p.Name != p.ProjectID {
+			label = fmt.Sprintf("%s (%s)", p.ProjectID, p.Name)
 		}
+		if p.ProjectID == curProject {
+			label += "  [current]"
+		}
+		if strings.HasPrefix(p.ProjectID, "apl-") {
+			label += "  [apl]"
+		}
+		options = append(options, label)
+		choices = append(choices, p.ProjectID)
 	}
+	options = append(options, "Create a new apl-* project")
+	choices = append(choices, "")
 
 	var projectID string
-	if len(aplProjects) > 0 {
-		// Always reuse an existing apl-* project — avoids drifting project
-		// sprawl on re-runs. To create a fresh one, delete the old project
-		// from GCP first.
-		projectID = aplProjects[0].ProjectID
-		fmt.Fprintf(stdout, "→ reusing %s\n", projectID)
-	} else {
-		if !prompter.Confirm("No apl-* projects found. Create a new one?") {
+	if len(options) == 1 {
+		// No existing projects at all — only the "Create new" option.
+		if !prompter.Confirm("No GCP projects visible. Create a new apl-* project?") {
 			return config.ProviderConfig{}, fmt.Errorf("%w: user declined project creation", ErrProviderFailure)
+		}
+	} else {
+		choice := prompter.Pick("Which GCP project?", options)
+		if choice < 0 || choice >= len(choices) {
+			return config.ProviderConfig{}, fmt.Errorf("%w: invalid project choice", ErrProviderFailure)
+		}
+		projectID = choices[choice]
+		if projectID != "" {
+			fmt.Fprintf(stdout, "→ using %s\n", projectID)
 		}
 	}
 
