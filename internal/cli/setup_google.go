@@ -272,7 +272,10 @@ Google will walk you through 4 sub-screens. Fill in:
 ─────────────────────────────────────────────────────────────────
 Step %d — Add scopes and your test user
 ─────────────────────────────────────────────────────────────────
-Open "Data Access" (left sidebar) → ADD OR REMOVE SCOPES → add:
+Open "Data Access" (left sidebar) → ADD OR REMOVE SCOPES.
+
+Scroll to "Manually add scopes" and paste this block verbatim
+(one scope per line), then click "Add to table":
 
   openid
   https://www.googleapis.com/auth/userinfo.email
