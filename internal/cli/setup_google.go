@@ -219,23 +219,61 @@ func runGoogle(
 		fmt.Fprintln(stdout, "✓ OAuth consent brand created via gcloud alpha iap oauth-brands")
 	}
 
-	consentURL := fmt.Sprintf("https://console.cloud.google.com/apis/credentials/consent?project=%s", projectID)
-	credURL := fmt.Sprintf("https://console.cloud.google.com/apis/credentials?project=%s", projectID)
+	// Google's "Auth Platform" UI URLs (new, replaces the old
+	// /apis/credentials/consent + /apis/credentials paths).
+	brandURL := fmt.Sprintf("https://console.cloud.google.com/auth/overview?project=%s", projectID)
+	dataAccessURL := fmt.Sprintf("https://console.cloud.google.com/auth/scopes?project=%s", projectID)
+	audienceURL := fmt.Sprintf("https://console.cloud.google.com/auth/audience?project=%s", projectID)
+	clientsURL := fmt.Sprintf("https://console.cloud.google.com/auth/clients/create?project=%s", projectID)
 
-	// Step 1: configure OAuth consent screen — only if we couldn't auto-create.
+	// Step 1: configure the OAuth brand (App Info / Audience / Contact /
+	// Finish wizard). Only if we couldn't auto-create via gcloud alpha.
 	if !brandAuto {
 		fmt.Fprintf(stdout, `
 ─────────────────────────────────────────────────────────────────
-Step 1 of 2 — Configure the OAuth consent screen
+Step 1 of 3 — Configure OAuth (Auth Platform wizard)
 ─────────────────────────────────────────────────────────────────
-Set:
-  User Type:           External
-  App name:            apl (local)
-  User support email:  %s
-  Developer contact:   %s
-  Test users:          %s
+Google will walk you through 4 sub-screens. Fill in:
 
-On the Scopes page, click "ADD OR REMOVE SCOPES" and add:
+  App Information
+    App name:            apl (local)
+    User support email:  %s
+
+  Audience
+    Select: External
+    (keep as Testing — adds you as a test user; supports up to 100
+     personal Gmail users before verification is required)
+
+  Contact Information
+    Email:               %s
+
+  Finish → click CREATE
+
+`, activeAccount, activeAccount)
+
+		if prompter.Confirm("Open the Auth Platform wizard in your browser now?") {
+			if err := oauth.Open(brandURL); err != nil {
+				fmt.Fprintf(stderr, "could not open browser: %v\n  Open this URL manually: %s\n", err, brandURL)
+			}
+		} else {
+			fmt.Fprintf(stdout, "Open manually: %s\n", brandURL)
+		}
+		if err := prompter.Wait("Press ENTER when the wizard finishes..."); err != nil {
+			return config.ProviderConfig{}, err
+		}
+	}
+
+	// Step 2: add scopes (Data Access) + add the user as a Test User.
+	step2Num := 2
+	if brandAuto {
+		step2Num = 1
+	}
+	fmt.Fprintf(stdout, `
+─────────────────────────────────────────────────────────────────
+Step %d — Add scopes and your test user
+─────────────────────────────────────────────────────────────────
+Open "Data Access" (left sidebar) → ADD OR REMOVE SCOPES → add:
+
   openid
   https://www.googleapis.com/auth/userinfo.email
   https://www.googleapis.com/auth/userinfo.profile
@@ -244,45 +282,48 @@ On the Scopes page, click "ADD OR REMOVE SCOPES" and add:
   https://www.googleapis.com/auth/contacts.readonly
   https://www.googleapis.com/auth/drive.readonly
 
-Click SAVE AND CONTINUE through each page, then PUBLISH or leave in Testing.
+Click UPDATE → SAVE.
 
-`, activeAccount, activeAccount, activeAccount)
+Then open "Audience" (left sidebar) → Test users → + ADD USERS:
+  %s
+Click SAVE.
 
-		if prompter.Confirm("Open the consent screen in your browser now?") {
-			if err := oauth.Open(consentURL); err != nil {
-				fmt.Fprintf(stderr, "could not open browser: %v\n  Open this URL manually: %s\n", err, consentURL)
-			}
-		} else {
-			fmt.Fprintf(stdout, "Open manually: %s\n", consentURL)
+`, step2Num, activeAccount)
+
+	if prompter.Confirm("Open Data Access page in your browser now?") {
+		if err := oauth.Open(dataAccessURL); err != nil {
+			fmt.Fprintf(stderr, "could not open browser: %v\n  Open this URL manually: %s\n", err, dataAccessURL)
 		}
-		if err := prompter.Wait("Press ENTER when the consent screen is saved..."); err != nil {
-			return config.ProviderConfig{}, err
-		}
+		fmt.Fprintf(stdout, "After saving scopes, open: %s\n", audienceURL)
+	} else {
+		fmt.Fprintf(stdout, "Open manually:\n  Data Access: %s\n  Audience:    %s\n", dataAccessURL, audienceURL)
+	}
+	if err := prompter.Wait("Press ENTER when scopes and test user are saved..."); err != nil {
+		return config.ProviderConfig{}, err
 	}
 
-	// Step 2: create the OAuth 2.0 Desktop Client ID.
-	stepNum := 2
-	if brandAuto {
-		stepNum = 1
-	}
+	// Step 3: create the OAuth 2.0 Desktop Client ID.
+	step3Num := step2Num + 1
 	fmt.Fprintf(stdout, `
 ─────────────────────────────────────────────────────────────────
 Step %d — Create OAuth 2.0 Client ID
 ─────────────────────────────────────────────────────────────────
-Click: + CREATE CREDENTIALS → OAuth client ID
+On the Clients page:
+  + CREATE CLIENT
   Application type:  Desktop app
   Name:              apl-desktop
+  Click CREATE
 
-Click CREATE. A dialog shows your Client ID and Client secret.
+A dialog shows your Client ID and Client secret. Copy the Client ID.
 
-`, stepNum)
+`, step3Num)
 
-	if prompter.Confirm("Open the credentials page in your browser now?") {
-		if err := oauth.Open(credURL); err != nil {
-			fmt.Fprintf(stderr, "could not open browser: %v\n  Open this URL manually: %s\n", err, credURL)
+	if prompter.Confirm("Open the Clients page in your browser now?") {
+		if err := oauth.Open(clientsURL); err != nil {
+			fmt.Fprintf(stderr, "could not open browser: %v\n  Open this URL manually: %s\n", err, clientsURL)
 		}
 	} else {
-		fmt.Fprintf(stdout, "Open manually: %s\n", credURL)
+		fmt.Fprintf(stdout, "Open manually: %s\n", clientsURL)
 	}
 	if err := prompter.Wait("Press ENTER when you've clicked CREATE and have the Client ID..."); err != nil {
 		return config.ProviderConfig{}, err
