@@ -54,4 +54,10 @@ tasks:
 
   clean:
     cmds:
-      - rm -rf bin/
+      - rm -rf bin/ .e2e-out/
+
+  e2e:ms:
+    desc: "Run the MS Graph end-to-end smoke script (needs az login + apl setup done)."
+    deps: [build]
+    cmds:
+      - ./tests/e2e/ms_smoke.sh {{.CLI_ARGS}}

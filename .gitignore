@@ -6,3 +6,4 @@
 coverage.txt
 .env
 .env.local
+/.e2e-out/
