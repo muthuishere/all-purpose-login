@@ -55,6 +55,7 @@ func main() {
 	root.AddCommand(cli.LogoutCmd(reg, st, os.Stdout, os.Stderr))
 	root.AddCommand(cli.AccountsCmd(reg, st, os.Stdout, os.Stderr))
 	root.AddCommand(cli.ScopesCmd(reg, os.Stdout, os.Stderr))
+	root.AddCommand(cli.CallCmd(reg, st, os.Stdout, os.Stderr))
 
 	if err := root.Execute(); err != nil {
 		var ce *cli.CLIError

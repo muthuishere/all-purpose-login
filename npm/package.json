@@ -1,0 +1,48 @@
+{
+  "name": "@muthuishere/apl",
+  "version": "0.0.0",
+  "description": "apl — OAuth token broker + HTTP relay for Google and Microsoft productivity APIs (Graph, Gmail, Drive, Calendar).",
+  "keywords": [
+    "apl",
+    "oauth",
+    "oauth2",
+    "pkce",
+    "token-broker",
+    "google",
+    "microsoft",
+    "graph",
+    "gmail",
+    "drive",
+    "calendar",
+    "cli"
+  ],
+  "homepage": "https://github.com/muthuishere/all-purpose-login",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/muthuishere/all-purpose-login.git"
+  },
+  "bugs": {
+    "url": "https://github.com/muthuishere/all-purpose-login/issues"
+  },
+  "license": "MIT",
+  "author": "Muthukumaran Navaneethakrishnan",
+  "bin": {
+    "apl": "./bin/apl.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@muthuishere/apl-darwin-arm64": "0.0.0",
+    "@muthuishere/apl-darwin-x64": "0.0.0",
+    "@muthuishere/apl-linux-arm64": "0.0.0",
+    "@muthuishere/apl-linux-x64": "0.0.0",
+    "@muthuishere/apl-windows-x64": "0.0.0"
+  },
+  "os": ["darwin", "linux", "win32"],
+  "cpu": ["arm64", "x64"],
+  "engines": {
+    "node": ">=18"
+  }
+}

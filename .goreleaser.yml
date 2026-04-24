@@ -1,0 +1,56 @@
+version: 2
+project_name: apl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: apl
+    main: ./cmd/apl
+    binary: apl
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w
+      - -X github.com/muthuishere/all-purpose-login/internal/version.Version={{.Version}}
+      - -X github.com/muthuishere/all-purpose-login/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/muthuishere/all-purpose-login/internal/version.Date={{.CommitDate}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    hooks:
+      post:
+        - cmd: scripts/stage-npm-binary.sh "{{ .Target }}" "{{ .Path }}"
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Version }}-snapshot"
+
+release:
+  draft: false
+  prerelease: auto
+  github:
+    owner: muthuishere
+    name: all-purpose-login

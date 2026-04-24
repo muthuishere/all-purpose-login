@@ -1,0 +1,13 @@
+{
+  "name": "@muthuishere/apl-darwin-arm64",
+  "version": "0.0.0",
+  "description": "apl prebuilt binary for darwin-arm64",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/muthuishere/all-purpose-login.git"
+  },
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin/"]
+}

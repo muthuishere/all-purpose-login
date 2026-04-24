@@ -1,0 +1,13 @@
+{
+  "name": "@muthuishere/apl-windows-x64",
+  "version": "0.0.0",
+  "description": "apl prebuilt binary for windows-x64",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/muthuishere/all-purpose-login.git"
+  },
+  "license": "MIT",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}

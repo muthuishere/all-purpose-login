@@ -67,3 +67,18 @@ tasks:
     deps: [build]
     cmds:
       - ./tests/e2e/google_smoke.sh {{.CLI_ARGS}}
+
+  release:snapshot:
+    desc: "Local smoke test of the release pipeline (no publish, no tag)."
+    cmds:
+      - goreleaser release --snapshot --clean --skip=publish
+
+  release:dry-run:
+    desc: "Verbose snapshot release for debugging the goreleaser config."
+    cmds:
+      - goreleaser release --snapshot --clean --skip=publish --verbose
+
+  npm:bump:
+    desc: "Sync npm package versions across main + 5 sub-packages. Usage: task npm:bump -- 0.1.0"
+    cmds:
+      - node scripts/bump-npm-version.js {{.CLI_ARGS}}

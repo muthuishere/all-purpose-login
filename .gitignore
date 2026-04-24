@@ -7,3 +7,13 @@ coverage.txt
 .env
 .env.local
 /.e2e-out/
+
+# Staged npm binaries (populated by goreleaser at release time). Keep the
+# directories (via .gitkeep) so goreleaser has a drop target, but never
+# commit the binaries themselves.
+npm/platforms/*/bin/*
+!npm/platforms/*/bin/.gitkeep
+
+# Node local install artifacts should never be committed.
+npm/node_modules/
+npm/**/node_modules/
