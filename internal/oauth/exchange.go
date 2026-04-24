@@ -18,6 +18,10 @@ type EndpointConfig struct {
 	TokenURL    string
 	ClientID    string
 	RedirectURI string
+	// ClientSecret is required for Google Desktop OAuth clients even in
+	// PKCE flow (Google-specific quirk); Microsoft public clients don't
+	// need it. Leave empty for providers that don't.
+	ClientSecret string
 }
 
 // TokenResponse mirrors the provider JSON token response.
@@ -52,6 +56,9 @@ func ExchangeCode(ctx context.Context, cfg EndpointConfig, code, verifier string
 	form.Set("code_verifier", verifier)
 	form.Set("client_id", cfg.ClientID)
 	form.Set("redirect_uri", cfg.RedirectURI)
+	if cfg.ClientSecret != "" {
+		form.Set("client_secret", cfg.ClientSecret)
+	}
 	return postToken(ctx, cfg.TokenURL, form, "")
 }
 
@@ -63,6 +70,9 @@ func Refresh(ctx context.Context, cfg EndpointConfig, refreshToken string, scope
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("client_id", cfg.ClientID)
+	if cfg.ClientSecret != "" {
+		form.Set("client_secret", cfg.ClientSecret)
+	}
 	if len(scopes) > 0 {
 		form.Set("scope", strings.Join(scopes, " "))
 	}

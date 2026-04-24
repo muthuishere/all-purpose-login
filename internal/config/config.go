@@ -14,9 +14,10 @@ import (
 var ErrNotConfigured = errors.New("config: not configured (run `apl setup`)")
 
 type ProviderConfig struct {
-	ClientID  string `yaml:"client_id,omitempty"`
-	ProjectID string `yaml:"project_id,omitempty"`
-	Tenant    string `yaml:"tenant,omitempty"`
+	ClientID     string `yaml:"client_id,omitempty"`
+	ClientSecret string `yaml:"client_secret,omitempty"`
+	ProjectID    string `yaml:"project_id,omitempty"`
+	Tenant       string `yaml:"tenant,omitempty"`
 }
 
 type Config struct {

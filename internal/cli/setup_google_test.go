@@ -4,11 +4,26 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/muthuishere/all-purpose-login/internal/config"
 )
+
+// writeGoogleClientJSON writes a Desktop-app client-secret JSON file to
+// t.TempDir and returns the path. Shared by all Google setup tests.
+func writeGoogleClientJSON(t *testing.T, clientID string) string {
+	t.Helper()
+	content := fmt.Sprintf(`{"installed":{"client_id":%q,"client_secret":"GOCSPX-test-secret","project_id":"p","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","redirect_uris":["http://localhost"]}}`, clientID)
+	p := filepath.Join(t.TempDir(), "client.json")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 
 func TestGoogle_Preflight_CLIMissing(t *testing.T) {
 	fs := newFakeShell()
@@ -37,7 +52,7 @@ func TestGoogle_Preflight_NoAccounts_CollapsesToSignIn(t *testing.T) {
 	p := &fakePrompter{
 		// Only 1 option: sign in. Then email, then project create confirm, then client id.
 		picks:    []int{0},
-		inputs:   []string{"new@x.com", "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs:   []string{"new@x.com", writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 		confirms: []bool{true}, // confirm project creation
 	}
 	v := &fakeValidator{}
@@ -74,7 +89,7 @@ func TestGoogle_AccountPicker_ExistingSelected(t *testing.T) {
 	p := &fakePrompter{
 		// pick index 1 (b@x.com), then pick project index 0
 		picks:    []int{1, 0},
-		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs:   []string{writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 		confirms: []bool{},
 	}
 	v := &fakeValidator{}
@@ -116,7 +131,7 @@ func TestGoogle_AccountPicker_SignInNew(t *testing.T) {
 	p := &fakePrompter{
 		// pick last option (sign in), then project, then client id
 		picks:  []int{1, 0},
-		inputs: []string{"new@x.com", "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs: []string{"new@x.com", writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 	}
 	v := &fakeValidator{}
 	_, err := runGoogle(context.Background(), config.ProviderConfig{}, fs, p, v, &bytes.Buffer{}, &bytes.Buffer{})
@@ -152,7 +167,7 @@ func TestGoogle_ReuseExistingProject(t *testing.T) {
 	p := &fakePrompter{
 		// picks: [account=0 (u@x.com active), project=0 (apl-muthu-abc)]
 		picks:  []int{0, 0},
-		inputs: []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs: []string{writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 	}
 	v := &fakeValidator{}
 
@@ -198,7 +213,7 @@ func TestGoogle_CreateNewProject(t *testing.T) {
 	p := &fakePrompter{
 		picks:    []int{0},
 		confirms: []bool{true},
-		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs:   []string{writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 	}
 	v := &fakeValidator{}
 
@@ -234,7 +249,7 @@ func TestGoogle_ClientIDValidationFails_ThenAbort(t *testing.T) {
 	// picks: [account=0, project=0]; confirms: [retry-after-validator-fail=false]
 	p := &fakePrompter{
 		picks:    []int{0, 0},
-		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs:   []string{writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 		confirms: []bool{false},
 	}
 	v := &fakeValidator{errors: []error{errors.New("invalid_client")}}
@@ -262,7 +277,7 @@ func TestGoogle_WalkthroughIncludesProjectURL(t *testing.T) {
 	var stdout bytes.Buffer
 	p := &fakePrompter{
 		picks:  []int{0, 0}, // account=0, project=0
-		inputs: []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs: []string{writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 	}
 	v := &fakeValidator{}
 

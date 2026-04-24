@@ -333,7 +333,9 @@ On the Clients page:
   Name:              apl-desktop
   Click CREATE
 
-A dialog shows your Client ID and Client secret. Copy the Client ID.
+A dialog shows your Client ID and Client secret. Click DOWNLOAD JSON
+(top-right of the dialog). apl needs the file, not just the ID —
+Google's Desktop OAuth requires the secret even with PKCE.
 
 `, step3Num)
 
@@ -351,9 +353,11 @@ A dialog shows your Client ID and Client secret. Copy the Client ID.
 	return googleClientIDLoop(ctx, prompter, validator, projectID, stdout, stderr)
 }
 
-// googleClientIDLoop prompts the user for a Client ID (raw, JSON blob, or
-// downloaded JSON file path), validates via the injected validator, and
-// returns a ProviderConfig on success.
+// googleClientIDLoop prompts for the path to the Google client-secret JSON
+// file (the "Download JSON" button on the OAuth client created dialog), reads
+// both client_id and client_secret from it, and returns the ProviderConfig.
+// Google's Desktop OAuth requires client_secret even for PKCE flow, so a raw
+// Client ID paste is insufficient — we insist on the file.
 func googleClientIDLoop(
 	ctx context.Context,
 	prompter Prompter,
@@ -361,9 +365,9 @@ func googleClientIDLoop(
 	projectID string,
 	stdout, stderr io.Writer,
 ) (config.ProviderConfig, error) {
-	var clientID string
+	var clientID, clientSecret string
 	for attempts := 0; attempts < 3; attempts++ {
-		raw := prompter.Input("Paste Client ID, JSON, or path to downloaded JSON file: ")
+		raw := prompter.Input("Path to downloaded client-secret JSON (drag-drop from Finder works): ")
 		raw = strings.TrimSpace(raw)
 		raw = strings.Trim(raw, "'\"")
 		if strings.HasPrefix(raw, "~/") {
@@ -371,44 +375,52 @@ func googleClientIDLoop(
 				raw = u.HomeDir + raw[1:]
 			}
 		}
-		if !strings.HasPrefix(raw, "{") && !strings.Contains(raw, "apps.googleusercontent.com") {
-			if body, rerr := os.ReadFile(raw); rerr == nil {
-				raw = strings.TrimSpace(string(body))
-			}
-		}
-		if strings.HasPrefix(raw, "{") {
-			var m map[string]any
-			if err := json.Unmarshal([]byte(raw), &m); err == nil {
-				if installed, ok := m["installed"].(map[string]any); ok {
-					if cid, ok := installed["client_id"].(string); ok {
-						raw = cid
-					}
-				} else if cid, ok := m["client_id"].(string); ok {
-					raw = cid
-				}
-			}
-		}
-		if !googleClientIDRe.MatchString(raw) {
-			fmt.Fprintf(stderr, "✗ client ID format invalid (expected <digits>-<hex>.apps.googleusercontent.com)\n")
+		body, rerr := os.ReadFile(raw)
+		if rerr != nil {
+			fmt.Fprintf(stderr, "✗ cannot read %q: %v\n", raw, rerr)
 			continue
 		}
-		if err := validator.Validate(ctx, raw); err != nil {
+		var m map[string]any
+		if err := json.Unmarshal(body, &m); err != nil {
+			fmt.Fprintf(stderr, "✗ not valid JSON: %v\n", err)
+			continue
+		}
+		// Google's client-secret JSON wraps everything under "installed" for
+		// Desktop clients (or "web" for web clients — we only accept installed).
+		installed, ok := m["installed"].(map[string]any)
+		if !ok {
+			fmt.Fprintf(stderr, "✗ JSON missing `installed` object — is this a Desktop-app client download?\n")
+			continue
+		}
+		cid, _ := installed["client_id"].(string)
+		csec, _ := installed["client_secret"].(string)
+		if !googleClientIDRe.MatchString(cid) {
+			fmt.Fprintf(stderr, "✗ client_id format invalid: %q\n", cid)
+			continue
+		}
+		if csec == "" {
+			fmt.Fprintf(stderr, "✗ client_secret missing from JSON\n")
+			continue
+		}
+		if err := validator.Validate(ctx, cid); err != nil {
 			fmt.Fprintf(stderr, "✗ OAuth round-trip failed: %v\n", err)
 			if !prompter.Confirm("Try again?") {
 				return config.ProviderConfig{}, fmt.Errorf("%w: client ID validation failed", ErrProviderFailure)
 			}
 			continue
 		}
-		clientID = raw
+		clientID = cid
+		clientSecret = csec
 		break
 	}
 	if clientID == "" {
-		return config.ProviderConfig{}, fmt.Errorf("%w: failed to obtain valid client ID after 3 attempts", ErrProviderFailure)
+		return config.ProviderConfig{}, fmt.Errorf("%w: failed to read a valid client-secret JSON after 3 attempts", ErrProviderFailure)
 	}
 	fmt.Fprintf(stdout, "✓ Google configured\n    project: %s\n    client: %s\n", projectID, clientID)
 	return config.ProviderConfig{
-		ClientID:  clientID,
-		ProjectID: projectID,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		ProjectID:    projectID,
 	}, nil
 }
 

@@ -208,8 +208,9 @@ func (g *Google) Login(ctx context.Context, label string, opts LoginOpts) (*stor
 	scopes = ensureOIDC(scopes)
 	flowCfg := oauth.FlowConfig{
 		Endpoint: oauth.EndpointConfig{
-			TokenURL: g.tokenURL,
-			ClientID: g.cfg.ClientID,
+			TokenURL:     g.tokenURL,
+			ClientID:     g.cfg.ClientID,
+			ClientSecret: g.cfg.ClientSecret,
 		},
 		Scopes: scopes,
 		AuthURLBuilder: func(redirectURI, state, challenge string) (string, error) {
@@ -277,7 +278,11 @@ func (g *Google) Refresh(ctx context.Context, rec *store.TokenRecord) (string, *
 	if rec.ExpiresAt.Sub(now) > 30*time.Second {
 		return rec.AccessToken, rec, nil
 	}
-	ep := oauth.EndpointConfig{TokenURL: g.tokenURL, ClientID: g.cfg.ClientID}
+	ep := oauth.EndpointConfig{
+		TokenURL:     g.tokenURL,
+		ClientID:     g.cfg.ClientID,
+		ClientSecret: g.cfg.ClientSecret,
+	}
 	tr, err := oauth.Refresh(ctx, ep, rec.RefreshToken, rec.Scopes)
 	if err != nil {
 		return "", nil, err

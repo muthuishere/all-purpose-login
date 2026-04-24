@@ -14,5 +14,11 @@ var googleAliases = map[string]string{
 	"drive.metadata.readonly":  "https://www.googleapis.com/auth/drive.metadata.readonly",
 	"contacts":          "https://www.googleapis.com/auth/contacts",
 	"contacts.readonly": "https://www.googleapis.com/auth/contacts.readonly",
-	"profile":           "openid email profile",
+
+	// OIDC scopes — accepted by Google as short literals.
+	"openid":  "openid",
+	"email":   "email",
+	// "profile" alone traditionally meant the full OIDC triplet in apl; keep
+	// the backwards-compatible compound expansion.
+	"profile": "openid email profile",
 }

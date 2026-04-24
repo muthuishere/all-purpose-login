@@ -115,7 +115,7 @@ func TestSetup_Reconfigure_ForcesReprompting(t *testing.T) {
 	fs := goodGoogleFakeShell()
 	p := &fakePrompter{
 		picks:  []int{0, 0}, // account=0, project=0
-		inputs: []string{"409786642553-zyxwvutsrqponmlkjihgfedcba012345.apps.googleusercontent.com"},
+		inputs: []string{writeGoogleClientJSON(t, "409786642553-zyxwvutsrqponmlkjihgfedcba012345.apps.googleusercontent.com")},
 	}
 	v := &fakeValidator{}
 
@@ -184,7 +184,7 @@ func TestSetup_ProviderFilter_GoogleOnly(t *testing.T) {
 	fs := goodGoogleFakeShell()
 	p := &fakePrompter{
 		picks:  []int{0, 0},
-		inputs: []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs: []string{writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 	}
 	v := &fakeValidator{}
 	opts := SetupOptions{
@@ -219,7 +219,7 @@ func TestSetup_AbortMidFlow_NoPartialConfig(t *testing.T) {
 	fs := goodGoogleFakeShell()
 	p := &fakePrompter{
 		picks:    []int{0, 0},                                                                            // account=0, project=0
-		inputs:   []string{"409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"},
+		inputs:   []string{writeGoogleClientJSON(t, "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com")},
 		confirms: []bool{false}, // decline retry
 	}
 	v := &fakeValidator{errors: []error{someErr("invalid_client")}}
