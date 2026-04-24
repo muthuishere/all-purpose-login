@@ -206,6 +206,112 @@ else
   fail "people connections -> HTTP $code ($body)"
 fi
 
+# 9. MAIL-R-25 — list labels (Gmail)
+hdr "9. MAIL-R-25 list labels (gmail.readonly)"
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" "$GMAIL/labels")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  count=$(echo "$body" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("labels",[])))')
+  pass "$count labels"
+else
+  fail "/labels -> HTTP $code"
+fi
+
+# 10. MAIL-W-6 — create draft, then delete it (gmail.compose)
+hdr "10. MAIL-W-6 create draft + cleanup"
+raw=$(python3 -c "
+import base64
+from email.message import EmailMessage
+msg = EmailMessage()
+msg['To'] = 'noreply@example.com'
+msg['Subject'] = 'apl e2e draft smoke (auto-deleted)'
+msg.set_content('draft created by tests/e2e/google_smoke.sh; auto-deleted')
+print(base64.urlsafe_b64encode(bytes(msg)).decode().rstrip('='))")
+payload=$(python3 -c "import json; print(json.dumps({'message':{'raw':'$raw'}}))")
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  -H "Content-Type: application/json" -X POST "$GMAIL/drafts" -d "$payload")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  DRAFT_ID=$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+  pass "draft created (id=$DRAFT_ID); deleting..."
+  del_code=$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" \
+    -X DELETE "$GMAIL/drafts/$DRAFT_ID")
+  if [[ "$del_code" == "204" ]]; then
+    pass "draft deleted (204)"
+  else
+    fail "draft delete -> HTTP $del_code"
+  fi
+else
+  fail "drafts create -> HTTP $code ($body)"
+fi
+
+# 11. CAL-W-8 — quickAdd event, then delete
+hdr "11. CAL-W-13 quickAdd event + cleanup"
+text="apl e2e smoke test at tomorrow 10am (auto-deleted)"
+q=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$text")
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  -X POST "$CAL/calendars/primary/events/quickAdd?text=$q")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  EVT_ID=$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+  pass "event created (id=$EVT_ID); deleting..."
+  del_code=$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" \
+    -X DELETE "$CAL/calendars/primary/events/$EVT_ID")
+  if [[ "$del_code" == "204" ]]; then
+    pass "event deleted (204)"
+  else
+    fail "event delete -> HTTP $del_code"
+  fi
+else
+  fail "quickAdd -> HTTP $code ($body)"
+fi
+
+# 12. DRIVE — search by MIME type (folders)
+hdr "12. DRIVE-15 search by MIME type (folders)"
+q=$(python3 -c "import urllib.parse; print(urllib.parse.quote(\"mimeType='application/vnd.google-apps.folder'\"))")
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  "$DRIVE/files?q=$q&pageSize=5&fields=files(id,name,mimeType)")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  count=$(echo "$body" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("files",[])))')
+  pass "$count folders"
+else
+  fail "folder search -> HTTP $code"
+fi
+
+# 13. DRIVE — shared with me
+hdr "13. DRIVE-16 shared-with-me"
+q=$(python3 -c "import urllib.parse; print(urllib.parse.quote('sharedWithMe=true'))")
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  "$DRIVE/files?q=$q&pageSize=5&fields=files(id,name,mimeType,owners)")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  count=$(echo "$body" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("files",[])))')
+  pass "$count shared-with-me files"
+else
+  fail "shared-with-me -> HTTP $code"
+fi
+
+# 14. DRIVE-20 — export Google Doc to PDF (opt-in via APL_SMOKE_DOC_ID)
+hdr "14. DRIVE-20 export Google Doc to PDF"
+if [[ -z "${APL_SMOKE_DOC_ID:-}" ]]; then
+  skip "APL_SMOKE_DOC_ID not set (fileId of a Google Doc you own)"
+else
+  code=$(curl -s -o "$OUT_DIR/doc_export.pdf" -w '%{http_code}' "${auth[@]}" \
+    "$DRIVE/files/$APL_SMOKE_DOC_ID/export?mimeType=application/pdf")
+  if [[ "$code" == "200" ]]; then
+    bytes=$(wc -c < "$OUT_DIR/doc_export.pdf")
+    pass "exported $bytes bytes to $OUT_DIR/doc_export.pdf"
+  else
+    fail "export -> HTTP $code"
+  fi
+fi
+
 # wrap
 hdr "result"
 if [[ $fails -eq 0 ]]; then

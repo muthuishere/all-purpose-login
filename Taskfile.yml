@@ -68,6 +68,27 @@ tasks:
     cmds:
       - ./tests/e2e/google_smoke.sh {{.CLI_ARGS}}
 
+  e2e:github:
+    desc: "Run GitHub smoke (requires `gh auth` + optional APL_SMOKE_REPO env)."
+    deps: [build]
+    cmds:
+      - ./tests/e2e/github_smoke.sh
+
+  e2e:brief:
+    desc: "Run Morning Brief aggregate smoke (pass google:handle ms:handle as args)."
+    deps: [build]
+    cmds:
+      - ./tests/e2e/morning_brief_smoke.sh {{.CLI_ARGS}}
+
+  e2e:all:
+    desc: "Run every e2e smoke (ms, google, github, brief)."
+    deps: [build]
+    cmds:
+      - ./tests/e2e/ms_smoke.sh {{.CLI_ARGS}}
+      - ./tests/e2e/google_smoke.sh {{.CLI_ARGS}}
+      - ./tests/e2e/github_smoke.sh
+      - ./tests/e2e/morning_brief_smoke.sh {{.CLI_ARGS}}
+
   release:snapshot:
     desc: "Local smoke test of the release pipeline (no publish, no tag)."
     cmds:

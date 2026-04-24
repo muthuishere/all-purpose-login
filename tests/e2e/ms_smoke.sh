@@ -208,10 +208,99 @@ resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" "$GRAPH/me/chats?\$top=50&\$expa
 code=$(echo "$resp" | tail -n1)
 body=$(echo "$resp" | sed '$d')
 if [[ "$code" == "200" ]]; then
+  echo "$body" > "$OUT_DIR/chats.json"
   count=$(echo "$body" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("value",[])))')
-  pass "$count chats visible"
+  pass "$count chats visible (CHAT-1; saved to $OUT_DIR/chats.json)"
 else
   fail "/me/chats -> HTTP $code"
+fi
+
+# 10. CAL-W-1 — create event (dry-run: build body + validate endpoint reachability, no POST)
+hdr "10. CAL-W-1 create event (dry-run — endpoint ping only)"
+# Instead of POSTing a real event, ping /me/calendar/events/$count to verify
+# the Calendars.ReadWrite-ish surface is reachable with the current token.
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  -H "ConsistencyLevel: eventual" \
+  "$GRAPH/me/calendar/events/\$count")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  pass "calendar events \$count = $body (write endpoint reachable; actual POST skipped)"
+else
+  fail "/me/calendar/events/\$count -> HTTP $code"
+fi
+
+# 11. CHAT-10 — send chat message (opt-in via APL_SMOKE_CHAT_ID)
+hdr "11. CHAT-10 send chat message"
+if [[ -z "${APL_SMOKE_CHAT_ID:-}" ]]; then
+  skip "APL_SMOKE_CHAT_ID not set (e.g. a self-DM chat id); manual opt-in"
+else
+  payload=$(python3 -c 'import json; print(json.dumps({"body":{"content":"apl e2e smoke ping","contentType":"text"}}))')
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" \
+    -H "Content-Type: application/json" -X POST \
+    "$GRAPH/me/chats/$APL_SMOKE_CHAT_ID/messages" -d "$payload")
+  if [[ "$code" == "201" ]]; then
+    pass "chat message sent to $APL_SMOKE_CHAT_ID (201)"
+  else
+    fail "CHAT-10 send -> HTTP $code"
+  fi
+fi
+
+# 12. DRIVE-1 — recent files (OneDrive)
+hdr "12. DRIVE-1 OneDrive recent files (Files.Read)"
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  "$GRAPH/me/drive/recent?\$top=10")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  count=$(echo "$body" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("value",[])))')
+  pass "$count recent OneDrive items"
+else
+  fail "/me/drive/recent -> HTTP $code"
+fi
+
+# 13. DRIVE-2 — shared with me (OneDrive)
+hdr "13. DRIVE-2 OneDrive shared-with-me (Files.Read.All)"
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  "$GRAPH/me/drive/sharedWithMe?\$top=10")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  count=$(echo "$body" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("value",[])))')
+  pass "$count shared-with-me items"
+else
+  fail "/me/drive/sharedWithMe -> HTTP $code"
+fi
+
+# 14. MEET-1 — calendar events with online meetings (client-side filter)
+hdr "14. MEET-1 online-meeting events (client-side filter)"
+# Graph rejects server-side $filter=isOnlineMeeting eq true on /me/events;
+# pull recent events and filter in-process.
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  "$GRAPH/me/events?\$top=25&\$select=subject,start,isOnlineMeeting,onlineMeeting&\$orderby=start/dateTime%20desc")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  count=$(echo "$body" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(sum(1 for e in d.get("value",[]) if e.get("isOnlineMeeting")))')
+  pass "$count online-meeting events (client-side filtered)"
+else
+  fail "/me/events -> HTTP $code"
+fi
+
+# 15. MAIL-R-27 — flagged messages
+hdr "15. MAIL-R-27 flagged messages (Mail.Read)"
+resp=$(curl -s -w '\n%{http_code}' "${auth[@]}" \
+  "$GRAPH/me/messages?\$filter=flag/flagStatus%20eq%20%27flagged%27&\$top=10&\$select=subject,from,flag,receivedDateTime")
+code=$(echo "$resp" | tail -n1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$code" == "200" ]]; then
+  count=$(echo "$body" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("value",[])))')
+  pass "$count flagged messages"
+else
+  fail "flagged messages -> HTTP $code"
 fi
 
 # wrap

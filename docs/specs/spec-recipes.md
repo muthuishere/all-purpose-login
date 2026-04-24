@@ -77,7 +77,7 @@ Per `spec-cli-command-surface.md` CLI-2: `^[a-z]+:[a-zA-Z0-9._-]+$`. Recipe exam
 
 ### Recipe families
 
-Below, recipes are grouped into 14 families. Every recipe is numbered `<FAMILY>-<N>` for stable citation from the companion skill.
+Below, recipes are grouped into 13 families. Every recipe is numbered `<FAMILY>-<N>` for stable citation from the companion skill.
 
 ---
 
@@ -228,7 +228,7 @@ apl call ms:reqsume POST "$GRAPH/me/presence/setPresence" \
 
 ---
 
-## Family 2 — Mail read (13 recipes)
+## Family 2 — Mail read (27 recipes)
 
 ### MAIL-R-1 — Recent messages (Microsoft)
 **Purpose:** 10 newest messages across all folders.
@@ -504,6 +504,17 @@ apl call google:muthu GET "$GMAIL/history?startHistoryId=<prev>"
 ```
 **Expected:** 200; `{ history: [{id, messages, messagesAdded, messagesDeleted, labelsAdded, labelsRemoved}, ...], historyId }`.
 **Gotchas:** A message's `historyId` (on any fetch) is your bookmark. Expired historyIds (>7 days old typically) return 404 — fall back to a full sync.
+
+### MAIL-R-27 — List flagged messages (Outlook)
+**Purpose:** Outlook messages the user has flagged for follow-up (what Outlook calls "flagged" / "for follow-up"). Canonical feed for BRIEF-5's follow-up-mail bucket.
+**Handle:** `ms:<label>`
+**Scopes:** `Mail.Read`
+**Call:**
+```bash
+apl call ms:reqsume GET "$GRAPH/me/messages?\$filter=flag/flagStatus%20eq%20%27flagged%27&\$top=25&\$select=subject,from,receivedDateTime,flag&\$orderby=receivedDateTime%20desc"
+```
+**Expected:** 200; `{ value: [{subject, from, receivedDateTime, flag:{flagStatus, dueDateTime?, startDateTime?}}, ...] }`.
+**Gotchas:** `flag/flagStatus` is a navigation property — percent-encode the single quotes (`%27`) around `'flagged'`. Values are `notFlagged | complete | flagged`. Combine with `isRead eq false` to narrow to "flagged AND unread": `\$filter=flag/flagStatus eq 'flagged' and isRead eq false`. Not currently available on Gmail — Gmail's closest analogue is `q=is:starred` (MAIL-R-17 pattern with `q=is:starred is:unread`).
 
 ---
 
@@ -1962,7 +1973,7 @@ apl call google:muthu POST "$CAL/calendars/primary/events/watch" --body '{
 
 ---
 
-## Family 12 — GitHub via `gh` CLI (22 recipes)
+## Family 12 — GitHub via `gh` CLI (37 recipes)
 
 GitHub's surface is covered by the `gh` CLI, not by `apl`. `gh` owns its own token store (`~/.config/gh/hosts.yml`) and auth flow (`gh auth login`); `apl` is not involved. These recipes follow the same per-recipe shape as earlier families, but the `Handle:` line becomes `Auth:` (since there is no apl handle) and the primary `Call:` uses `gh` directly. A `Fallback:` block is provided where the `gh` surface is thin or where the caller wants to chain the raw REST API through `apl`-style scripting — the fallback form is `gh api <endpoint>` (preferred, since `gh` injects the bearer automatically) or a raw `curl` with `--header "Authorization: Bearer $(gh auth token)"`.
 
@@ -2313,6 +2324,87 @@ gh search prs    "<query> is:merged author:@me" --json number,title,url,reposito
 **Gotchas:** Qualifiers like `is:`, `author:`, `label:`, `repo:`, `org:`, `in:title`, `created:>=2026-01-01` all work. Quote multi-word phrases inside the query. `gh search` auto-URL-encodes — do NOT pre-encode.
 **Fallback:** `gh api "search/issues?q=<url-encoded-query>"`.
 
+### GH-31 — Watch a run until it finishes
+**Purpose:** Block until an Actions run completes; exit non-zero if it failed. Useful for "tell me when CI is done" or chaining a deploy after a build.
+**Auth:** `gh auth status` with `workflow` scope.
+**Call:**
+```bash
+gh run watch <run-id> --exit-status
+```
+**Expected response (short):** Live status stream on stdout, concluding with the final status line. Exit 0 on `success`, 1 on `failure`/`cancelled`/`timed_out`.
+**Gotchas:** Long-running jobs can exceed an agent tool-call timeout — if that's a risk, poll with `gh run view <id> --json status,conclusion` every 15-30s instead of blocking on `watch`. Dropping `--exit-status` makes the command always exit 0, which defeats the "did it pass?" question.
+**Fallback:** `while : ; do s=$(gh api "repos/<owner/name>/actions/runs/<run-id>" --jq '.status'); [[ "$s" == "completed" ]] && break; sleep 15; done`.
+
+### GH-32 — List releases
+**Purpose:** Paginated release history for a repo.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh release list --limit 20 --json tagName,name,isLatest,isPrerelease,isDraft,publishedAt,url
+```
+**Expected response (short):** `[{tagName, name, isLatest, isPrerelease, isDraft, publishedAt, url}, ...]`.
+**Gotchas:** Drafts are only visible to users with push access; expect `isDraft: false` for every row otherwise. Supersedes the listing half of GH-27.
+**Fallback:** `gh api "repos/<owner/name>/releases?per_page=20"`.
+
+### GH-33 — Latest release
+**Purpose:** Resolve the "latest" release (the non-draft, non-prerelease one GitHub marks `latest`).
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh release view --json tagName,name,body,assets,publishedAt,url
+```
+**Expected response (short):** release object with `assets[]` each having `{name, size, url, apiUrl}`.
+**Gotchas:** `gh release view` with no tag-arg follows GitHub's "latest" pointer — which excludes drafts AND prereleases. If the repo only has prereleases, this 404s; fall back to `gh release list --limit 1`.
+**Fallback:** `gh api "repos/<owner/name>/releases/latest"`.
+
+### GH-34 — Create a release with notes + artifacts
+**Purpose:** Cut a release tag + upload artifacts in one invocation. Canonical way `apl` itself ships.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh release create <tag> ./dist/*.tar.gz \
+  --title "<release title>" \
+  --notes-file CHANGELOG.md \
+  --target <branch-or-sha> \
+  [--draft] [--prerelease] [--generate-notes]
+```
+**Expected response (short):** Release URL on stdout; assets uploaded in the same call.
+**Gotchas:** Tag is created server-side if it doesn't already exist on `--target`. `--generate-notes` auto-writes release notes from PR titles since the previous tag — useful when you don't maintain a CHANGELOG file. Artifact globs that match zero files cause the CLI to fail early.
+**Fallback:** Two-step: `gh api --method POST "repos/<owner/name>/releases" -f tag_name=... -f name=... -f body=..."` then `gh release upload <tag> <file>...` — the single-shot form above is strictly better.
+
+### GH-35 — Search code
+**Purpose:** Full-text code search across GitHub, scoped via qualifiers.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search code "<query>" --language=go --owner=<org-or-user> --limit 30 --json repository,path,textMatches
+```
+**Expected response (short):** `[{repository:{nameWithOwner}, path, textMatches:[{fragment, matches:[...]}]}, ...]`.
+**Gotchas:** Code search requires at least one scoping qualifier (`repo:`, `org:`, `user:`, `language:`) for non-admin callers — unqualified queries return `validation failed`. Rate-limited more aggressively than issue/PR search (30 req/min authenticated). Includes `textMatches` in `--json` output (unlike the older `gh search code` behaviour — confirm with your `gh` version).
+**Fallback:** `gh api "search/code?q=<query>+language:go+org:<org>" -H "Accept: application/vnd.github.text-match+json" --jq '.items[] | {repo: .repository.full_name, path, text_matches}'`.
+
+### GH-36 — Search issues
+**Purpose:** Free-form issue search across all accessible repos.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search issues "<query>" --state=open --limit 30 --json number,title,repository,url,updatedAt
+```
+**Expected response (short):** `[{number, title, repository:{nameWithOwner}, url, updatedAt}, ...]`.
+**Gotchas:** `gh search issues` excludes PRs automatically; use GH-37 for PRs. Add `repo:<owner/name>` or `org:<org>` to narrow a broad query. Quote multi-word phrases inside the query string.
+**Fallback:** `gh api "search/issues?q=<url-encoded-query>+is:issue"`.
+
+### GH-37 — Search PRs
+**Purpose:** Free-form PR search across all accessible repos.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search prs "<query>" --state=open --limit 30 --json number,title,repository,url,author,updatedAt
+```
+**Expected response (short):** `[{number, title, repository:{nameWithOwner}, url, author:{login}, updatedAt}, ...]`.
+**Gotchas:** Qualifiers: `is:merged`, `is:draft`, `author:@me`, `review-requested:@me`, `head:<branch>`, `base:<branch>`. `gh search prs` auto-URL-encodes — do NOT pre-encode.
+**Fallback:** `gh api "search/issues?q=<url-encoded-query>+is:pr"`.
+
 ---
 
 ## Family 13 — Morning Brief / Daily Aggregate (8 recipes)
@@ -2399,12 +2491,12 @@ On success: write `last_brief_ts = <now, UTC>`.
 2. `gh search prs --state=open --review-requested=@me ...` (GH-7).
 3. `gh search issues --state=open --assignee=@me ...` (GH-16).
 4. `gh search issues --state=open --mentions=@me ...` (GH-17).
-5. `apl call ms:$ms_handle GET "$GRAPH/me/messages?\$filter=flag/flagStatus eq 'flagged' and isRead eq false"` → flagged Outlook mail needing follow-up (uses Family 2 pattern; not a numbered recipe — see Gotchas).
+5. `apl call ms:$ms_handle GET "$GRAPH/me/messages?\$filter=flag/flagStatus eq 'flagged' and isRead eq false"` → flagged Outlook mail needing follow-up (MAIL-R-27).
 6. `apl call google:$google_handle GET "$GMAIL/messages?q=is:starred is:unread"` → starred + unread Gmail.
 
 **Synthesis hint:** Four sections — **Review**, **Assigned**, **Mentioned**, **Follow-up mail** — in that order (review is most time-sensitive because it's blocking someone else). Within each, sort by age-of-last-update ascending (oldest first → most stale → most likely to be forgotten). For each item: one line, `<repo-or-provider> #<n>: <title> — <age>`.
 
-**Gotchas:** Recipe 5 uses a `flagStatus eq 'flagged'` filter that's not currently a numbered recipe in Family 2 — flagged as invented-for-brief. Either add a new MAIL-R recipe, or scope down to unread-only. The Gmail `is:starred is:unread` query is cheap and doesn't need a separate recipe.
+**Gotchas:** Recipe 5 uses MAIL-R-27 which filters on `flag/flagStatus eq 'flagged'`; that navigation property IS supported by Graph (single quotes must be percent-encoded in the URL). The Gmail `is:starred is:unread` query is cheap and doesn't need a separate recipe.
 
 ### BRIEF-6 — Any new message (lightweight poll)
 
@@ -2423,16 +2515,21 @@ On success: write `last_brief_ts = <now, UTC>`.
 
 **User intent:** "who's pinged me", "who wants my attention", "mentions", "am I needed anywhere".
 
-**Call sequence:**
-1. `apl call ms:$ms_handle GET "$GRAPH/me/chats/getAllMessages?\$filter=contains(body/content,'<my-display-name>') or mentionsMe eq true"` → Teams @-mentions (CHAT-7 variant; `mentionsMe` is a convenience filter — see Gotchas).
+**Call sequence (canonical — client-side mention inspection):**
+1. `apl call ms:$ms_handle GET "$GRAPH/me/chats/getAllMessages?\$top=50&\$orderby=lastModifiedDateTime desc"` → recent Teams messages (CHAT-7), then **client-side** filter to those whose `mentions[]` contains the caller's `userIdentity.id` or `userIdentity.displayName`. Graph has no native `mentionsMe` filter on chat messages; fetch the batch and inspect `mentions[].mentioned.user.id` locally.
 2. `apl call google:$google_handle GET "$GMAIL/messages?q=to:me is:unread"` + per-message MAIL-R-22 (MAIL-R-17 + MAIL-R-22).
 3. `apl call ms:$ms_handle GET "$GRAPH/me/messages?\$filter=isRead eq false and toRecipients/any(r:r/emailAddress/address eq '$user_email_ms')"` → direct-to-me MS mail.
 4. `gh search prs --state=open --review-requested=@me ...` (GH-7).
 5. `gh search issues --state=open --mentions=@me ...` (GH-17).
 
+**Fallback sequence (older tenants without `/me/chats/getAllMessages`, or when client-side filtering is too expensive):**
+1a. `apl call ms:$ms_handle GET "$GRAPH/me/chats/getAllMessages?\$filter=contains(body/content,'<my-display-name>')"` → Teams messages whose body mentions the display name verbatim. Cruder (catches plain-text mentions that aren't actual @-mentions, misses mentions formatted as `@Muthu` without the full display name), but server-side filterable. Use this branch only when step 1 canonical can't run.
+
+(Steps 2-5 are identical to the canonical sequence.)
+
 **Synthesis hint:** Group by sender/requester, not by channel. One line per asker: "<name>: <n> items across <channels>". Then expand top 3 askers with item specifics. The goal is to surface "the 2 people I need to respond to today" — not a raw feed.
 
-**Gotchas:** `mentionsMe eq true` is NOT a standard Graph property on chat messages — flagged as invented-for-brief. The real mechanism is to fetch messages and inspect `mentions[]` client-side; `contains(body/content, ...)` with the user's display name is a cruder but actually-supported workaround. Muthu to decide which form ships.
+**Gotchas:** There is no `mentionsMe` property on Graph chat messages (earlier drafts of this spec cited one — it was invented). The canonical path is to pull `mentions[]` and match `mentions[].mentioned.user.id` against the caller's `IDENT-1` id. The `contains(body/content, '<display-name>')` fallback is cheaper wire-wise but noisier semantically.
 
 ### BRIEF-8 — Today's focus (terse one-glance)
 
