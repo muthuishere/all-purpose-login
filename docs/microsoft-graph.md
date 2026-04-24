@@ -124,7 +124,13 @@ Do **not** pass the Bearer token on the download URL — SharePoint rejects it b
 
 **Why this works when `/recordings/{id}/content` doesn't:**
 
-`/recordings/{id}/content` uses Graph's `OnlineMeetingRecording` authorization path, which gates on meeting-participant ACL. `/users/{id}/drive/root:/path` uses Graph's `Files` authorization path, which gates on the OneDrive item's sharing ACL — and Teams auto-shares meeting recordings with all participants for Teams' own playback. `Files.Read.All` is enough to read them that way.
+`/recordings/{id}/content` uses Graph's `OnlineMeetingRecording` authorization path, which gates on meeting-participant ACL. `/users/{id}/drive/root:/path` uses Graph's `Files` authorization path, which gates on the OneDrive item's sharing ACL.
+
+**Important caveat — verified 2026-04-24:** Teams does **not** reliably auto-share recordings with all meeting participants. In the reqsume tenant, a participant (muthu@reqsume.onmicrosoft.com) could list the organizer's OneDrive item metadata and obtain a `@microsoft.graph.downloadUrl` with `Files.Read.All` + `Sites.Read.All` + admin consent — but the resulting SharePoint download still returned **403 accessDenied** because the item ACL had not granted the participant explicit read. `/me/drive/sharedWithMe` also did not show the recording.
+
+When the organizer **has** explicitly shared the recording with the caller (via Teams Recording chat → Share, or OneDrive Share link), the download works as documented above. When they haven't, no combination of delegated scopes (`Files.Read.All`, `Sites.Read.All`, `OnlineMeetingRecording.Read.All`) unblocks the SharePoint ACL.
+
+**Net:** treat the OneDrive download as a best-effort path that works when the recording has been shared with the caller. For unshared recordings, the only programmatic option is to use an app-only token with `Files.Read.All` as a Role (not a Scope) — which requires tenant-admin consent to app-only auth and changes the trust model significantly (app can read any file in the tenant). Most non-admin users should ask the organizer to share explicitly.
 
 **Equivalent for transcripts:**
 
