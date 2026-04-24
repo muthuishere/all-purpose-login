@@ -40,8 +40,15 @@
     "@muthuishere/apl-linux-x64": "0.0.0",
     "@muthuishere/apl-windows-x64": "0.0.0"
   },
-  "os": ["darwin", "linux", "win32"],
-  "cpu": ["arm64", "x64"],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
   "engines": {
     "node": ">=18"
   }

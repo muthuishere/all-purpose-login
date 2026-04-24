@@ -7,7 +7,13 @@
     "url": "https://github.com/muthuishere/all-purpose-login.git"
   },
   "license": "MIT",
-  "os": ["win32"],
-  "cpu": ["x64"],
-  "files": ["bin/"]
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ]
 }
