@@ -81,6 +81,38 @@ Below, recipes are grouped into 14 families. Every recipe is numbered `<FAMILY>-
 
 ---
 
+### State model
+
+Recipes often need user-specific context that isn't worth re-asking every call: the active `ms:` / `google:` handle, the current GitHub repo (`owner/name`), the "since last brief" timestamp for delta recipes, the user's canonical email for `to:me` filters, etc. That context lives in three layers:
+
+```
+Layer      Where                                    Scope
+─────────  ──────────────────────────────────────   ──────────────────────
+session    agent conversation memory only           ephemeral override
+project    ~/config/muthuishere-agent-skills/       per-repo defaults
+           <reponame>/state.yaml                    (active handles, gh repo,
+                                                     'since' timestamp, etc.)
+global     ~/.claude/skills/all-purpose-data/       user-global defaults
+           state.yaml                                (rare; fallback only)
+```
+
+**Resolution order:** session > project > global > ask.
+
+**First-touch interview model is lazy.** Do NOT ask everything upfront. When a recipe needs a value that is not in any layer, ask for *just that value*, execute, then cache it to `project` state for next time. The companion skill owns reads/writes to these files; recipes here assume the values are already resolved at call time.
+
+**Typical keys:**
+
+- `ms_handle` — e.g. `ms:reqsume`. Required for any Family 1-11 MS recipe.
+- `google_handle` — e.g. `google:muthu`. Required for any Family 1-11 Google recipe.
+- `gh_repo` — `owner/name`. Required for any Family 12 recipe outside a git repo; auto-detected from CWD otherwise.
+- `user_email_ms` / `user_email_google` — used by "to:me" filters and mention searches. Resolvable from IDENT-1 / IDENT-4 on first touch.
+- `gh_login` — GitHub username. Resolvable from `gh api user --jq .login` on first touch. Used for `user:@me` searches and review-request filters.
+- `last_brief_ts` — ISO-8601 UTC. Written by BRIEF-1 and BRIEF-2 at successful completion. Read by BRIEF-2.
+
+Handles and tokens themselves are NOT stored here — those live in the OS keyring via `apl` and in `gh`'s own token store. `state.yaml` stores only the *selection* of which handle is active.
+
+---
+
 ## Family 1 — Identity (4 recipes)
 
 ### IDENT-1 — Current user (Microsoft)
@@ -1927,6 +1959,501 @@ apl call google:muthu POST "$CAL/calendars/primary/events/watch" --body '{
 ```
 **Expected:** 200; channel object with `resourceId` used to stop the channel.
 **Gotchas:** Your address must be HTTPS with a publicly-verifiable certificate. Stop channels with `POST /channels/stop`.
+
+---
+
+## Family 12 — GitHub via `gh` CLI (22 recipes)
+
+GitHub's surface is covered by the `gh` CLI, not by `apl`. `gh` owns its own token store (`~/.config/gh/hosts.yml`) and auth flow (`gh auth login`); `apl` is not involved. These recipes follow the same per-recipe shape as earlier families, but the `Handle:` line becomes `Auth:` (since there is no apl handle) and the primary `Call:` uses `gh` directly. A `Fallback:` block is provided where the `gh` surface is thin or where the caller wants to chain the raw REST API through `apl`-style scripting — the fallback form is `gh api <endpoint>` (preferred, since `gh` injects the bearer automatically) or a raw `curl` with `--header "Authorization: Bearer $(gh auth token)"`.
+
+**Auth model.** Every recipe assumes `gh auth status` shows a logged-in account with scopes `repo, read:org, workflow, gist` (the defaults from `gh auth login -s workflow`). If a recipe needs a scope beyond that, it says so.
+
+**Repo detection.** `gh` auto-detects `owner/name` from the current directory's git remote. Outside a git repo, pass `--repo <owner/name>` explicitly; every recipe below notes this where relevant. The active repo can be cached in `project` state as `gh_repo` (see "State model").
+
+**JSON output.** Every `gh <noun> list|view` recipe uses `--json <fields>` where available so the agent gets machine-parseable output. Use `--jq <expr>` to post-filter without piping into a separate `jq`.
+
+### GH-1 — Repo info
+**Purpose:** View metadata for a repo (description, default branch, visibility, stars).
+**Auth:** `gh auth status` must show a logged-in account. No apl tokens involved.
+**Call:**
+```bash
+gh repo view <owner/name> --json name,description,defaultBranchRef,visibility,stargazerCount,pushedAt,url
+```
+**Expected response (short):** `{ name, description, defaultBranchRef:{name}, visibility, stargazerCount, pushedAt, url }`.
+**Gotchas:** Omit `<owner/name>` to use the current repo's remote. Private-repo visibility requires `repo` scope.
+**Fallback:** `gh api repos/<owner/name>` or `curl --header "Authorization: Bearer $(gh auth token)" https://api.github.com/repos/<owner/name>`.
+
+### GH-2 — List my repos
+**Purpose:** Every repo the signed-in user owns or collaborates on, most-recently-pushed first.
+**Auth:** `gh auth status` must show a logged-in account. No apl tokens involved.
+**Call:**
+```bash
+gh repo list --limit 100 --json name,nameWithOwner,isPrivate,isFork,pushedAt,description --jq 'sort_by(.pushedAt) | reverse'
+```
+**Expected response (short):** `[{nameWithOwner, isPrivate, isFork, pushedAt, description}, ...]`.
+**Gotchas:** Default `--limit` is 30 — always pass `--limit` explicitly when you want the full set. `gh repo list <org>` scopes to an org.
+**Fallback:** `gh api user/repos?per_page=100&sort=pushed --paginate`.
+
+### GH-3 — List starred repos
+**Purpose:** User's starred repos for quick reference lookups.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh api user/starred?per_page=100 --paginate --jq '.[] | {nameWithOwner: .full_name, description, url: .html_url, pushedAt: .pushed_at}'
+```
+**Expected response (short):** stream of `{nameWithOwner, description, url, pushedAt}` objects.
+**Gotchas:** `gh` has no first-class `repo list --starred` — hence the `gh api` form. `--paginate` walks `Link: rel="next"` transparently.
+**Fallback:** N/A — this IS the fallback form.
+
+### GH-4 — Default branch lookup
+**Purpose:** Resolve a repo's default branch (needed for PR base, release targets).
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh repo view <owner/name> --json defaultBranchRef --jq '.defaultBranchRef.name'
+```
+**Expected response (short):** single string, e.g. `main` or `dev`.
+**Gotchas:** Deliberately not hard-coding `main` — this repo uses `dev` for reqsume/volentis. Never assume.
+**Fallback:** `gh api repos/<owner/name> --jq .default_branch`.
+
+### GH-5 — Clone by slug
+**Purpose:** Clone a repo into CWD by `owner/name`.
+**Auth:** `gh auth status` (uses gh's token as the git credential helper; avoids SSH-key friction).
+**Call:**
+```bash
+gh repo clone <owner/name> [local-dir]
+```
+**Expected response (short):** exit 0 + new directory on disk. Stdout is git's clone progress.
+**Gotchas:** `gh` configures the clone's `origin` to use HTTPS + gh's credential helper. Switch to SSH with `git remote set-url origin git@github.com:<owner/name>.git` if preferred.
+**Fallback:** `git clone https://github.com/<owner/name>.git` (loses gh credential injection).
+
+### GH-6 — PRs assigned to me
+**Purpose:** Open PRs with me as assignee (ownership queue), across all repos.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search prs --state=open --assignee=@me --json number,title,url,repository,author,updatedAt --limit 50
+```
+**Expected response (short):** `[{number, title, url, repository:{nameWithOwner}, author:{login}, updatedAt}, ...]`.
+**Gotchas:** Cross-repo queries MUST use `gh search prs`, not `gh pr list` (which is single-repo). Assignment is different from review-request — see GH-7.
+**Fallback:** `gh api "search/issues?q=is:pr+is:open+assignee:@me" --jq '.items[]'`.
+
+### GH-7 — PRs needing my review
+**Purpose:** PRs where I'm a requested reviewer and haven't yet reviewed.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search prs --state=open --review-requested=@me --json number,title,url,repository,author,updatedAt --limit 50
+```
+**Expected response (short):** `[{number, title, url, repository:{nameWithOwner}, author:{login}, updatedAt}, ...]`.
+**Gotchas:** Once you approve or request-changes, the PR falls off this list automatically. Team-review-requests also count.
+**Fallback:** `gh api "search/issues?q=is:pr+is:open+review-requested:@me"`.
+
+### GH-8 — My authored open PRs
+**Purpose:** PRs I authored that are still open (my outbound queue).
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search prs --state=open --author=@me --json number,title,url,repository,isDraft,reviewDecision,updatedAt --limit 50
+```
+**Expected response (short):** `[{number, title, url, repository:{nameWithOwner}, isDraft, reviewDecision, updatedAt}, ...]`.
+**Gotchas:** `reviewDecision` is one of `APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null`. Drafts have `isDraft: true` — filter client-side if you want non-drafts only.
+**Fallback:** `gh api "search/issues?q=is:pr+is:open+author:@me"`.
+
+### GH-9 — View PR with comments and checks
+**Purpose:** Full PR context — body, comments, review comments, CI status — in one call tree.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh pr view <number-or-url> --comments --json number,title,body,state,isDraft,mergeable,reviewDecision,reviews,comments,statusCheckRollup,headRefName,baseRefName,url
+```
+**Expected response (short):** PR object with `reviews[]`, `comments[]`, and `statusCheckRollup[]` (one entry per check run).
+**Gotchas:** `--comments` prints issue comments to stdout separately from `--json`; if you need them in JSON use the `comments` field. Review-thread comments (inline on diff) are under `reviews[].comments` — the top-level `comments` is conversation-level.
+**Fallback:** `gh api "repos/<owner/name>/pulls/<n>"` + `.../pulls/<n>/reviews` + `.../issues/<n>/comments` + `.../commits/<sha>/check-runs`.
+
+### GH-10 — Approve a PR
+**Purpose:** Cast an APPROVE review.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh pr review <number-or-url> --approve --body "LGTM"
+```
+**Expected response (short):** `Approved pull request #<n>` on stdout.
+**Gotchas:** Self-approval is blocked by GitHub; approving your own PR errors out. `--body` is optional but recommended.
+**Fallback:** `gh api --method POST "repos/<owner/name>/pulls/<n>/reviews" -f event=APPROVE -f body="LGTM"`.
+
+### GH-11 — Request changes on a PR
+**Purpose:** Block merge with a CHANGES_REQUESTED review.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh pr review <number-or-url> --request-changes --body "<required explanation>"
+```
+**Expected response (short):** `Requested changes on pull request #<n>`.
+**Gotchas:** `--body` is REQUIRED for `--request-changes` (GitHub rejects an empty body). Use `--comment` for a non-blocking review comment instead.
+**Fallback:** `gh api --method POST "repos/<owner/name>/pulls/<n>/reviews" -f event=REQUEST_CHANGES -f body="..."`.
+
+### GH-12 — Comment on a PR (non-review)
+**Purpose:** Drop a conversational comment without submitting a formal review.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh pr comment <number-or-url> --body "your message"
+```
+**Expected response (short):** URL of the new comment on stdout.
+**Gotchas:** For an inline review comment on a specific diff line, use `gh api` with the `pulls/<n>/comments` endpoint — `gh pr comment` only creates top-level conversation comments.
+**Fallback:** `gh api --method POST "repos/<owner/name>/issues/<n>/comments" -f body="..."` (PR comments live under `/issues/`, not `/pulls/`, for non-review text).
+
+### GH-13 — Check out a PR branch locally
+**Purpose:** Fetch a PR's head branch and switch to it.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh pr checkout <number-or-url>
+```
+**Expected response (short):** Git switches to the PR branch; stdout shows `Switched to branch '<branch>'`.
+**Gotchas:** Works even for forks — `gh` adds the fork as a remote transparently. Dirty working tree aborts the checkout; stash or commit first.
+**Fallback:** `git fetch origin pull/<n>/head:pr-<n> && git switch pr-<n>`.
+
+### GH-14 — Merge a PR
+**Purpose:** Merge an approved PR using the configured strategy.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh pr merge <number-or-url> --squash --delete-branch
+```
+**Expected response (short):** `Merged pull request #<n>` + branch deletion confirmation.
+**Gotchas:** Pass exactly one of `--merge | --squash | --rebase`. `--delete-branch` only deletes the remote branch; local stays. `--auto` queues a merge once checks pass — useful for "merge when green".
+**Fallback:** `gh api --method PUT "repos/<owner/name>/pulls/<n>/merge" -f merge_method=squash`.
+
+### GH-15 — Close PR without merging
+**Purpose:** Close a PR (abandon) without merging.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh pr close <number-or-url> --comment "abandoning — superseded by #<other>"
+```
+**Expected response (short):** `Closed pull request #<n>`.
+**Gotchas:** `--delete-branch` deletes the remote head branch too. Closing is reversible via `gh pr reopen <n>`.
+**Fallback:** `gh api --method PATCH "repos/<owner/name>/pulls/<n>" -f state=closed`.
+
+### GH-16 — Issues assigned to me
+**Purpose:** Open issues across all repos with me as assignee.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search issues --state=open --assignee=@me --json number,title,url,repository,labels,updatedAt --limit 50
+```
+**Expected response (short):** `[{number, title, url, repository:{nameWithOwner}, labels:[{name}], updatedAt}, ...]`.
+**Gotchas:** `gh search issues` excludes PRs by default; `gh search prs` is the sibling. `gh issue list` is single-repo only.
+**Fallback:** `gh api "search/issues?q=is:issue+is:open+assignee:@me"`.
+
+### GH-17 — Issues mentioning me
+**Purpose:** Open issues where I'm @-mentioned (but not necessarily assigned).
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search issues --state=open --mentions=@me --json number,title,url,repository,updatedAt --limit 50
+```
+**Expected response (short):** `[{number, title, url, repository:{nameWithOwner}, updatedAt}, ...]`.
+**Gotchas:** "Mentions" is literal `@login` in the issue body or a comment. Does not include team mentions.
+**Fallback:** `gh api "search/issues?q=is:issue+is:open+mentions:@me"`.
+
+### GH-18 — My authored open issues
+**Purpose:** Open issues I opened (my outbound backlog).
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search issues --state=open --author=@me --json number,title,url,repository,updatedAt --limit 50
+```
+**Expected response (short):** `[{number, title, url, repository:{nameWithOwner}, updatedAt}, ...]`.
+**Gotchas:** N/A.
+**Fallback:** `gh api "search/issues?q=is:issue+is:open+author:@me"`.
+
+### GH-19 — View issue with comments
+**Purpose:** Full issue context including the comment thread.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh issue view <number-or-url> --comments --json number,title,body,state,labels,assignees,comments,url
+```
+**Expected response (short):** issue object with `comments[]` array.
+**Gotchas:** Works with a full URL so the agent doesn't need to separately resolve owner/repo when the user pastes a link.
+**Fallback:** `gh api "repos/<owner/name>/issues/<n>"` + `.../issues/<n>/comments`.
+
+### GH-20 — Create issue
+**Purpose:** Open a new issue in a repo.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh issue create --title "<title>" --body "<markdown body>" [--label bug,priority-high] [--assignee @me] [--repo <owner/name>]
+```
+**Expected response (short):** URL of the new issue on stdout.
+**Gotchas:** `--label` values must already exist in the repo; otherwise 422. `--body-file -` lets you stream body from stdin (heredoc-friendly).
+**Fallback:** `gh api --method POST "repos/<owner/name>/issues" -f title="..." -f body="..."`.
+
+### GH-21 — Close / reopen / label / comment on an issue
+**Purpose:** Common mutations on an existing issue.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh issue close <n> --comment "done in #<pr>"
+gh issue reopen <n>
+gh issue edit <n> --add-label "bug" --remove-label "needs-triage"
+gh issue comment <n> --body "an update"
+```
+**Expected response (short):** one-line confirmation per command (`Closed issue #<n>`, etc.).
+**Gotchas:** `gh issue edit --add-assignee @me` is the assignment sibling. Label additions validate server-side.
+**Fallback:** `gh api --method PATCH "repos/<owner/name>/issues/<n>" -f state=closed` (and sibling PATCHes for labels/assignees).
+
+### GH-22 — Pending review requests (detail view)
+**Purpose:** Same set as GH-7 but including team-review-requests and grouped by repo — useful as a "review queue" summary.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search prs --state=open --review-requested=@me --json number,title,url,repository,author,reviewDecision,updatedAt --limit 100 --jq 'group_by(.repository.nameWithOwner) | map({repo: .[0].repository.nameWithOwner, prs: map({number, title, author: .author.login, updatedAt, url})})'
+```
+**Expected response (short):** `[{repo, prs: [{number, title, author, updatedAt, url}, ...]}, ...]`.
+**Gotchas:** `--jq` expression requires jq syntax — test locally before chaining. Team requests also show up when a team you're in is the requested reviewer.
+**Fallback:** GH-7 without the `--jq` grouping.
+
+### GH-23 — Recent workflow runs
+**Purpose:** Last 20 Actions runs for the current repo.
+**Auth:** `gh auth status` with `workflow` scope (default on `gh auth login -s workflow`).
+**Call:**
+```bash
+gh run list --limit 20 --json databaseId,name,displayTitle,status,conclusion,headBranch,event,createdAt,url
+```
+**Expected response (short):** `[{databaseId, name, displayTitle, status, conclusion, headBranch, event, createdAt, url}, ...]`.
+**Gotchas:** `status` is `queued | in_progress | completed`; `conclusion` is `success | failure | cancelled | ...` and is `null` while `status != completed`. Outside a git repo pass `--repo <owner/name>`.
+**Fallback:** `gh api "repos/<owner/name>/actions/runs?per_page=20"`.
+
+### GH-24 — View run status + failing-step logs
+**Purpose:** Deep-dive into a specific run, including logs for failed jobs.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh run view <run-id> --log-failed
+```
+**Expected response (short):** Run summary header on stdout, then failed-step log lines. Add `--json jobs,conclusion,headSha,url` for machine-parseable summary without logs.
+**Gotchas:** `--log` prints ALL logs (can be huge); `--log-failed` is the right default for triage. Log retention is 90 days by default.
+**Fallback:** `gh api "repos/<owner/name>/actions/runs/<run-id>/logs"` (returns a zip of logs — requires binary handling).
+
+### GH-25 — Re-run a failed workflow
+**Purpose:** Re-trigger a workflow run (all failed jobs, or all jobs).
+**Auth:** `gh auth status` with `workflow` scope.
+**Call:**
+```bash
+gh run rerun <run-id> --failed        # re-run only the failed jobs
+gh run rerun <run-id>                 # re-run all jobs
+```
+**Expected response (short):** `Requested rerun of run <run-id>` on stdout.
+**Gotchas:** `--failed` requires the run to be in `completed` state. For a workflow-dispatch event you may want `gh workflow run <workflow.yml>` instead (fresh run with fresh inputs), not `rerun`.
+**Fallback:** `gh api --method POST "repos/<owner/name>/actions/runs/<run-id>/rerun-failed-jobs"`.
+
+### GH-26 — Cancel a running workflow
+**Purpose:** Cancel an in-progress run.
+**Auth:** `gh auth status` with `workflow` scope.
+**Call:**
+```bash
+gh run cancel <run-id>
+```
+**Expected response (short):** `Request to cancel workflow submitted.`
+**Gotchas:** Cancellation is async — the run moves to `cancelled` after the runner acks, typically within 30s. Not all jobs may have started yet; those are skipped.
+**Fallback:** `gh api --method POST "repos/<owner/name>/actions/runs/<run-id>/cancel"`.
+
+### GH-27 — List releases / view latest
+**Purpose:** Release history for a repo; get the latest release quickly.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh release list --limit 10 --json tagName,name,isLatest,isPrerelease,publishedAt,url
+gh release view --json tagName,name,body,assets,publishedAt,url   # latest
+gh release view <tag> --json tagName,name,body,assets,publishedAt,url   # specific tag
+```
+**Expected response (short):** release object(s) with `assets[]` each having `{name, size, url}`.
+**Gotchas:** `gh release view` with no tag picks the latest non-draft release. Drafts are visible only to users with push access.
+**Fallback:** `gh api "repos/<owner/name>/releases/latest"`.
+
+### GH-28 — Create release with notes + artifacts
+**Purpose:** Cut a release matching how `apl` itself ships today (tag + notes + binaries from `dist/`).
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh release create <tag> \
+  --title "<release title>" \
+  --notes-file CHANGELOG.md \
+  --target <branch-or-sha> \
+  dist/apl-darwin-arm64 dist/apl-darwin-amd64 dist/apl-linux-amd64 dist/apl-linux-arm64 dist/apl-windows-amd64.exe
+```
+**Expected response (short):** Release URL on stdout; assets uploaded in the same call.
+**Gotchas:** Tag is created server-side if it doesn't already exist on `--target`. For a draft release pass `--draft`; for a pre-release pass `--prerelease`. `--generate-notes` auto-generates notes from PR titles since the previous tag if you'd rather not maintain a CHANGELOG file.
+**Fallback:** Two-step: `gh api --method POST "repos/<owner/name>/releases" -f tag_name=... -f name=... -f body=..."` then `gh release upload <tag> <file>...` — the single-shot form above is strictly better.
+
+### GH-29 — Search code across repos
+**Purpose:** Full-text code search across GitHub (all accessible repos).
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search code "<query>" --language=go --owner=<org-or-user> --limit 30 --json repository,path,url
+```
+**Expected response (short):** `[{repository:{nameWithOwner}, path, url}, ...]`.
+**Gotchas:** `gh search code` does NOT return matching line numbers / snippets in `--json` output — the CLI prints them to stdout in human mode but they're not in the structured form. For snippets fall back to `gh api`. Rate-limited more aggressively than issue/PR search (30 req/min authenticated).
+**Fallback:** `gh api "search/code?q=<query>+language:go+org:<org>" --jq '.items[] | {repo: .repository.full_name, path, text_matches}'` with header `Accept: application/vnd.github.text-match+json` to get `text_matches`.
+
+### GH-30 — Search issues / PRs by query
+**Purpose:** Free-form search across issues and PRs using GitHub's search qualifiers.
+**Auth:** `gh auth status`.
+**Call:**
+```bash
+gh search issues "<query> is:open author:@me label:bug" --json number,title,url,repository,state,updatedAt --limit 50
+gh search prs    "<query> is:merged author:@me" --json number,title,url,repository,mergedAt --limit 50
+```
+**Expected response (short):** per-match objects with the requested fields.
+**Gotchas:** Qualifiers like `is:`, `author:`, `label:`, `repo:`, `org:`, `in:title`, `created:>=2026-01-01` all work. Quote multi-word phrases inside the query. `gh search` auto-URL-encodes — do NOT pre-encode.
+**Fallback:** `gh api "search/issues?q=<url-encoded-query>"`.
+
+---
+
+## Family 13 — Morning Brief / Daily Aggregate (8 recipes)
+
+These are **agent-directed aggregate** recipes. Each one specifies a sequence of calls from the earlier families (2 Mail, 4 Calendar read, 6 Teams chat, 10 Delta, 12 GitHub) that the agent issues — in parallel where safe — then synthesizes into a single user-facing answer. They are not new HTTP surfaces; they are *orchestration recipes* that cite the underlying recipe IDs so the synthesis logic has a stable reference.
+
+**Shape differs from Families 1-12.** Instead of a single `Call:` block, each recipe has a `Call sequence:` with the recipes it invokes, and a `Synthesis hint:` paragraph telling the agent how to format the combined result. The usual `apl call` / `gh` invocations are fully specified in the cited recipes — this family does not repeat them.
+
+**Handle resolution.** "Both providers" means the agent uses whichever of `ms_handle` and `google_handle` are present in project state. If only one is configured, run only that side — do NOT prompt the user mid-brief. Missing provider is a synthesis note ("No Google account configured — Gmail skipped."), not a blocker.
+
+**Timestamp persistence.** BRIEF-1 and BRIEF-2 write `last_brief_ts = <now, ISO-8601 UTC>` to project state on successful completion. BRIEF-2 reads it on next invocation. BRIEF-6 is stateless and takes `since` as an argument.
+
+### BRIEF-1 — Morning brief (full)
+
+**User intent:** "morning brief", "what's on my plate", "catch me up", "start my day", "daily standup prep".
+
+**Call sequence (agent issues in parallel where safe):**
+1. `apl call ms:$ms_handle GET ...` → unread inbox (MAIL-R-2).
+2. `apl call google:$google_handle GET ...` → unread Gmail (MAIL-R-17).
+3. `apl call ms:$ms_handle GET ...` → today's Microsoft events (CAL-R-1).
+4. `apl call google:$google_handle GET ...` → today's Google events (CAL-R-7).
+5. `apl call ms:$ms_handle GET ...` → all new Teams messages across chats since `last_brief_ts` (CHAT-7; or per-chat CHAT-6 loop if tenant lacks `/me/chats/getAllMessages`).
+6. `gh search prs --state=open --assignee=@me ...` → PRs assigned (GH-6).
+7. `gh search prs --state=open --review-requested=@me ...` → PRs needing review (GH-7).
+8. `gh search issues --state=open --assignee=@me ...` → issues assigned (GH-16).
+9. `gh search issues --state=open --mentions=@me ...` → issues mentioning me (GH-17).
+
+On success: write `last_brief_ts = <now, UTC>` to project state.
+
+**Synthesis hint:** Group by urgency, top-down: (a) next meeting within 1 hour (include time-to-start and Join URL if present); (b) rest of today's meetings in chronological order, deduplicated across providers by subject+start-time; (c) unread mail older than 24h flagged as "aging", newer as "fresh"; (d) PRs needing review sorted by `updatedAt` ascending (oldest wait first); (e) assignments (PRs + issues) sorted by `updatedAt` descending; (f) Teams mentions / direct messages. End with the count of items in each bucket. If a bucket is empty, say "no <bucket>" in one line rather than omitting it silently.
+
+**Gotchas:** If `ms_handle` or `google_handle` is absent from state, skip that side and note it. CHAT-7 requires a preview scope and tenant flag; on 403 fall back to CHAT-1 → loop CHAT-6 per chat (slower, but always works). Deduplicate meetings: a Google Calendar event that's a Teams meeting will ALSO appear in Graph; match on `start.dateTime` + normalized subject.
+
+### BRIEF-2 — What's new since last check (delta only)
+
+**User intent:** "what's new", "what changed since I last checked", "delta", "since my last brief".
+
+**Call sequence:**
+1. Read `last_brief_ts` from project state. If absent, tell the user "no prior brief on record — run a full brief first" and stop.
+2. `apl call ms:$ms_handle GET "$GRAPH/me/mailFolders/inbox/messages/delta"` → new mail (SYNC-3 / MAIL-R-15, using saved `@odata.deltaLink`).
+3. `apl call google:$google_handle GET "$GMAIL/history?startHistoryId=..."` → new Gmail (SYNC-1 / MAIL-R-26).
+4. `apl call ms:$ms_handle GET "$GRAPH/me/calendarView/delta?..."` → MS calendar changes (SYNC-4).
+5. `apl call google:$google_handle GET "$CAL/calendars/primary/events?syncToken=..."` → Google calendar changes (SYNC-2).
+6. `apl call ms:$ms_handle GET "$GRAPH/me/chats/getAllMessages?$filter=lastModifiedDateTime gt $last_brief_ts"` → new Teams messages (CHAT-7).
+7. `gh search prs --state=open --review-requested=@me updated:>=$last_brief_ts` → PRs newly-requested or updated (GH-7 + qualifier).
+8. `gh search issues state=open mentions:@me updated:>=$last_brief_ts` → issues newly mentioning me (GH-17 + qualifier).
+
+On success: write `last_brief_ts = <now, UTC>`.
+
+**Synthesis hint:** Pure delta — do NOT include items that existed before `last_brief_ts`. Format as a changelog: "2 new mails, 1 meeting moved, 1 PR review requested, 0 new mentions." Expand each bucket with specifics. Empty-overall state is a single line: "Nothing new since <last_brief_ts human-relative>."
+
+**Gotchas:** Delta tokens for Graph mail expire after ~30 days of idleness (410). Google Calendar `syncToken` expires after ~7 days (410). Both require a bootstrap full sync on 410 — synthesis message for the user: "Delta tokens expired; re-bootstrapping." Gmail `historyId` is shorter-lived (1-7 days) and `history` returns `404` when too old.
+
+### BRIEF-3 — Unread mail (cross-provider)
+
+**User intent:** "unread mail", "what's in my inbox", "check my email", "any unread".
+
+**Call sequence:**
+1. `apl call ms:$ms_handle GET "$GRAPH/me/mailFolders/inbox/messages?\$filter=isRead eq false&\$top=25&\$select=subject,from,receivedDateTime"` (MAIL-R-2).
+2. `apl call google:$google_handle GET "$GMAIL/messages?q=is:unread&maxResults=25"` then per-message MAIL-R-22 for headers (MAIL-R-17 + MAIL-R-22).
+
+**Synthesis hint:** Interleave both providers sorted by received-time descending. Prefix each line with the provider tag (`[ms]` / `[gmail]`) so the user can tell which inbox it came from. Show sender + subject + human-relative time ("2h ago"). Cap the combined list at 25 items; tell the user the total unread counts across both ("25 of 137 unread").
+
+**Gotchas:** Gmail's `q=is:unread` is label-based, not truly "unread" in the IMAP sense — archived-but-unread messages still show up. MS `isRead eq false` is strict inbox-only when scoped to `/mailFolders/inbox`. For just-the-count, use MAIL-R-3 (MS) and a `q=is:unread` count via `resultSizeEstimate` (Gmail) — cheaper.
+
+### BRIEF-4 — Today's calendar (cross-provider)
+
+**User intent:** "today's calendar", "what's my day look like", "meetings today", "agenda".
+
+**Call sequence:**
+1. `apl call ms:$ms_handle GET "$GRAPH/me/calendarView?startDateTime=<today-00:00Z>&endDateTime=<tomorrow-00:00Z>&\$orderby=start/dateTime&\$select=subject,start,end,location,onlineMeeting,attendees,organizer"` (CAL-R-1).
+2. `apl call google:$google_handle GET "$CAL/calendars/primary/events?timeMin=<today-00:00Z>&timeMax=<tomorrow-00:00Z>&singleEvents=true&orderBy=startTime"` (CAL-R-7).
+
+**Synthesis hint:** Merge both provider lists, sort by start time ascending. Dedupe: if subject+start match within 5 minutes across providers it's the same event — prefer the Graph version (more attendee detail). Mark the **next** event (first one with `start > now`) distinctly. Include join URL (prefer `onlineMeeting.joinUrl` for MS; `hangoutLink` / `conferenceData.entryPoints[0].uri` for Google). Empty day → "No meetings today."
+
+**Gotchas:** `singleEvents=true` on Google expands recurring events — without it a weekly standup shows once as a recurrence master, not as today's instance. MS `calendarView` does this automatically. Time bounds MUST be UTC ISO-8601; the timezone conversion to the user's local tz is a synthesis concern, not a query concern.
+
+### BRIEF-5 — My work queue
+
+**User intent:** "my queue", "what am I on the hook for", "my work", "action items", "what needs me".
+
+**Call sequence:**
+1. `gh search prs --state=open --assignee=@me ...` (GH-6).
+2. `gh search prs --state=open --review-requested=@me ...` (GH-7).
+3. `gh search issues --state=open --assignee=@me ...` (GH-16).
+4. `gh search issues --state=open --mentions=@me ...` (GH-17).
+5. `apl call ms:$ms_handle GET "$GRAPH/me/messages?\$filter=flag/flagStatus eq 'flagged' and isRead eq false"` → flagged Outlook mail needing follow-up (uses Family 2 pattern; not a numbered recipe — see Gotchas).
+6. `apl call google:$google_handle GET "$GMAIL/messages?q=is:starred is:unread"` → starred + unread Gmail.
+
+**Synthesis hint:** Four sections — **Review**, **Assigned**, **Mentioned**, **Follow-up mail** — in that order (review is most time-sensitive because it's blocking someone else). Within each, sort by age-of-last-update ascending (oldest first → most stale → most likely to be forgotten). For each item: one line, `<repo-or-provider> #<n>: <title> — <age>`.
+
+**Gotchas:** Recipe 5 uses a `flagStatus eq 'flagged'` filter that's not currently a numbered recipe in Family 2 — flagged as invented-for-brief. Either add a new MAIL-R recipe, or scope down to unread-only. The Gmail `is:starred is:unread` query is cheap and doesn't need a separate recipe.
+
+### BRIEF-6 — Any new message (lightweight poll)
+
+**User intent:** "any new messages since <time>", "anything new in the last hour", "quick check".
+
+**Call sequence (stateless — `$since` is a user-provided ISO-8601 UTC timestamp):**
+1. `apl call ms:$ms_handle GET "$GRAPH/me/mailFolders/inbox/messages?\$filter=receivedDateTime gt $since and isRead eq false&\$select=subject,from,receivedDateTime&\$top=25"` (MAIL-R pattern).
+2. `apl call google:$google_handle GET "$GMAIL/messages?q=is:unread after:<epoch-seconds-of-$since>&maxResults=25"` (MAIL-R-17 variant).
+3. `apl call ms:$ms_handle GET "$GRAPH/me/chats/getAllMessages?\$filter=lastModifiedDateTime gt $since"` (CHAT-7).
+
+**Synthesis hint:** One-screen output. Three buckets: "Mail (ms)", "Mail (gmail)", "Teams". Count + first 3 items per bucket. If all zero → "Nothing new since <since>.".
+
+**Gotchas:** Different from BRIEF-2: BRIEF-2 uses delta tokens (incremental server-side state); BRIEF-6 uses timestamp filtering (stateless, may miss deleted/edited items, but doesn't require prior state). `$since` for Gmail needs epoch seconds (`date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$since" +%s` on BSD / macOS; `date -u -d "$since" +%s` on GNU).
+
+### BRIEF-7 — Who's asked me something (mentions aggregator)
+
+**User intent:** "who's pinged me", "who wants my attention", "mentions", "am I needed anywhere".
+
+**Call sequence:**
+1. `apl call ms:$ms_handle GET "$GRAPH/me/chats/getAllMessages?\$filter=contains(body/content,'<my-display-name>') or mentionsMe eq true"` → Teams @-mentions (CHAT-7 variant; `mentionsMe` is a convenience filter — see Gotchas).
+2. `apl call google:$google_handle GET "$GMAIL/messages?q=to:me is:unread"` + per-message MAIL-R-22 (MAIL-R-17 + MAIL-R-22).
+3. `apl call ms:$ms_handle GET "$GRAPH/me/messages?\$filter=isRead eq false and toRecipients/any(r:r/emailAddress/address eq '$user_email_ms')"` → direct-to-me MS mail.
+4. `gh search prs --state=open --review-requested=@me ...` (GH-7).
+5. `gh search issues --state=open --mentions=@me ...` (GH-17).
+
+**Synthesis hint:** Group by sender/requester, not by channel. One line per asker: "<name>: <n> items across <channels>". Then expand top 3 askers with item specifics. The goal is to surface "the 2 people I need to respond to today" — not a raw feed.
+
+**Gotchas:** `mentionsMe eq true` is NOT a standard Graph property on chat messages — flagged as invented-for-brief. The real mechanism is to fetch messages and inspect `mentions[]` client-side; `contains(body/content, ...)` with the user's display name is a cruder but actually-supported workaround. Muthu to decide which form ships.
+
+### BRIEF-8 — Today's focus (terse one-glance)
+
+**User intent:** "give me the short version", "one line", "quick status", "focus mode", "just the headline".
+
+**Call sequence:**
+1. `apl call ms:$ms_handle GET "$GRAPH/me/calendarView?startDateTime=<now>&endDateTime=<end-of-day>&\$orderby=start/dateTime&\$top=1&\$select=subject,start,onlineMeeting"` → next MS meeting (CAL-R-3 variant).
+2. `apl call google:$google_handle GET "$CAL/calendars/primary/events?timeMin=<now>&singleEvents=true&orderBy=startTime&maxResults=1"` → next Google meeting (CAL-R-8 variant).
+3. `apl call ms:$ms_handle GET "$GRAPH/me/mailFolders/inbox/messages/\$count?\$filter=isRead eq false"` → unread MS count (MAIL-R-3).
+4. `apl call google:$google_handle GET "$GMAIL/messages?q=is:unread&maxResults=1"` → unread Gmail count via `resultSizeEstimate`.
+5. `gh search prs --state=open --review-requested=@me --json url --limit 100 | jq length` → PRs waiting count (GH-7).
+
+**Synthesis hint:** Exactly 3 lines of output, no preamble:
+```
+Next meeting: <subject> in <X> min (<join-url-or-location>)
+Unread: <N> mail (<ms_n> ms / <google_n> gmail)
+Review queue: <K> PRs waiting
+```
+If no next meeting today: `Next meeting: none today.` Same terseness for empty buckets.
+
+**Gotchas:** Use the cheap count endpoints — do NOT fetch message bodies. `$count` (Graph) and `resultSizeEstimate` (Gmail) are the right tools here. Also consider a short cache (60s) on these calls so a user running `focus` five times in a minute doesn't burn rate limit.
 
 ---
 
