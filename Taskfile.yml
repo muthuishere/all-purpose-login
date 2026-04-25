@@ -103,3 +103,24 @@ tasks:
     desc: "Sync npm package versions across main + 5 sub-packages. Usage: task npm:bump -- 0.1.0"
     cmds:
       - node scripts/bump-npm-version.js {{.CLI_ARGS}}
+
+  npm:publish:
+    desc: "Publish all 6 @muthuishere/apl* packages to npm (sub-packages first, then main). Requires npm whoami to succeed and binaries staged."
+    cmds:
+      - bash scripts/publish-npm-local.sh
+
+  npm:publish:auto:
+    desc: "Publish all 6 packages non-interactively (no OTP) — for automation tokens. Versions must be bumped and binaries staged."
+    cmds:
+      - npm whoami
+      - cd npm/platforms/darwin-arm64 && npm publish --access public
+      - cd npm/platforms/darwin-x64 && npm publish --access public
+      - cd npm/platforms/linux-arm64 && npm publish --access public
+      - cd npm/platforms/linux-x64 && npm publish --access public
+      - cd npm/platforms/windows-x64 && npm publish --access public
+      - cd npm && npm publish --access public
+
+  release:
+    desc: "Full local release: bump → build → publish → tag → push → GH release. Usage: task release -- 0.2.0"
+    cmds:
+      - bash scripts/release-local.sh {{.CLI_ARGS}}
