@@ -1,6 +1,6 @@
 {
   "name": "@muthuishere/apl",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "apl — OAuth token broker + HTTP relay for Google and Microsoft productivity APIs (Graph, Gmail, Drive, Calendar).",
   "keywords": [
     "apl",
@@ -34,11 +34,11 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@muthuishere/apl-darwin-arm64": "0.0.0",
-    "@muthuishere/apl-darwin-x64": "0.0.0",
-    "@muthuishere/apl-linux-arm64": "0.0.0",
-    "@muthuishere/apl-linux-x64": "0.0.0",
-    "@muthuishere/apl-windows-x64": "0.0.0"
+    "@muthuishere/apl-darwin-arm64": "0.2.0",
+    "@muthuishere/apl-darwin-x64": "0.2.0",
+    "@muthuishere/apl-linux-arm64": "0.2.0",
+    "@muthuishere/apl-linux-x64": "0.2.0",
+    "@muthuishere/apl-windows-x64": "0.2.0"
   },
   "os": [
     "darwin",

@@ -1,6 +1,6 @@
 {
   "name": "@muthuishere/apl-windows-x64",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "apl prebuilt binary for windows-x64",
   "repository": {
     "type": "git",
