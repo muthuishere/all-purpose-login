@@ -85,32 +85,61 @@ Requires Go 1.24 + [Task](https://taskfile.dev). Contributors only — end users
 ### Microsoft side
 
 ```bash
-az login                    # one time
-apl setup ms                # creates Azure app registration, grants Graph scopes
-apl login ms:work           # browser OAuth, tokens encrypted on disk
+az login                              # one time
+apl setup ms --label work             # creates Azure app registration, grants Graph scopes
+apl login ms:work                     # browser OAuth, tokens encrypted on disk
 apl call ms:work GET https://graph.microsoft.com/v1.0/me/messages?\$top=5
 ```
 
 ### Google side
 
 ```bash
-gcloud auth login           # one time
-apl setup google            # pick GCP project, enable APIs, paste client JSON
-apl login google:personal   # browser OAuth
+gcloud auth login                     # one time
+apl setup google --label personal     # pick GCP project, enable APIs, paste client JSON
+apl login google:personal             # browser OAuth
 apl call google:personal GET https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is:unread
 ```
 
 ### Multiple accounts per provider
 
-Use the `provider:label` form — any label you want.
+Each label gets its own OAuth client config (`config.yaml` keyed under
+`google:<label>` / `microsoft:<label>`). The fastest path for a second
+account is **reuse**: share the existing OAuth client and just add the
+new email as a test user.
 
 ```bash
-apl setup ms                      # configures the app registration once
-apl login ms:work                 # first account
-apl login ms:personal             # second account, separate browser flow
-apl login ms:client-contoso       # third, etc.
-apl accounts                      # list them all
+# First account — full setup creates a new GCP project + OAuth client.
+apl setup google --label muthuishere
+apl login google:muthuishere
+
+# Second account on the same project — reuse the client, add as test user only.
+apl setup google --label deemwar --reuse=muthuishere --account=admin@deemwar.com
+apl login google:deemwar
 ```
+
+### LLM-driveable setup (`--json`)
+
+Setup is a resumable state machine. Each browser hand-off emits an
+`awaiting_human` or `awaiting_input` NDJSON event with the **exact**
+console URL and required fields, then exits. Re-invoke with `--resume`
+(plus any newly-supplied flags) to continue.
+
+```bash
+apl setup google --label deemwar --reuse=muthuishere --json --reuse-confirm=yes
+# {"event":"step_started","step":"reuse_confirm"}
+# {"event":"step_done","step":"reuse_confirm",...}
+# {"event":"awaiting_human","step":"add_test_user",
+#  "url":"https://console.cloud.google.com/auth/audience?project=apl-...",
+#  "instructions":"... add: admin@deemwar.com. SAVE.",
+#  "resume_command":"apl setup google --label deemwar --resume --json"}
+
+# After the human adds the test user in the browser, resume:
+apl setup google --label deemwar --resume --json --account=admin@deemwar.com
+# {"event":"completed","label":"deemwar","summary":{"client_id":...}}
+```
+
+State lives at `~/.config/apl/setup-state/<provider>-<label>.yaml`.
+`--status` shows progress; `--reset-state` wipes it.
 
 ---
 

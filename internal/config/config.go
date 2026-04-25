@@ -20,9 +20,81 @@ type ProviderConfig struct {
 	Tenant       string `yaml:"tenant,omitempty"`
 }
 
+// Config holds OAuth client configuration keyed by label, per provider.
+// Each label corresponds to a handle suffix, e.g. cfg.Google["deemwar"]
+// is the OAuth client used by `apl login google:deemwar`.
 type Config struct {
-	Google    ProviderConfig `yaml:"google,omitempty"`
-	Microsoft ProviderConfig `yaml:"microsoft,omitempty"`
+	Google    map[string]ProviderConfig `yaml:"google,omitempty"`
+	Microsoft map[string]ProviderConfig `yaml:"microsoft,omitempty"`
+}
+
+// GetProvider returns the per-label config for a provider, or false if absent.
+func (c *Config) GetProvider(provider, label string) (ProviderConfig, bool) {
+	if c == nil {
+		return ProviderConfig{}, false
+	}
+	m := c.providerMap(provider)
+	if m == nil {
+		return ProviderConfig{}, false
+	}
+	pc, ok := m[label]
+	return pc, ok
+}
+
+// SetProvider writes the per-label config for a provider, allocating the map
+// if needed.
+func (c *Config) SetProvider(provider, label string, pc ProviderConfig) {
+	switch provider {
+	case "google":
+		if c.Google == nil {
+			c.Google = make(map[string]ProviderConfig)
+		}
+		c.Google[label] = pc
+	case "ms", "microsoft":
+		if c.Microsoft == nil {
+			c.Microsoft = make(map[string]ProviderConfig)
+		}
+		c.Microsoft[label] = pc
+	}
+}
+
+// Labels returns the configured labels for a provider, sorted.
+func (c *Config) Labels(provider string) []string {
+	m := c.providerMap(provider)
+	if m == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	// stable order; small N so a sort.Strings is fine
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
+
+// AnyLabel returns one configured label for a provider (deterministic-ish:
+// the first in sorted order), or "" if none.
+func (c *Config) AnyLabel(provider string) string {
+	labels := c.Labels(provider)
+	if len(labels) == 0 {
+		return ""
+	}
+	return labels[0]
+}
+
+func (c *Config) providerMap(provider string) map[string]ProviderConfig {
+	switch provider {
+	case "google":
+		return c.Google
+	case "ms", "microsoft":
+		return c.Microsoft
+	}
+	return nil
 }
 
 // DefaultPath returns $XDG_CONFIG_HOME/apl/config.yaml, falling back to
@@ -69,7 +141,6 @@ func Save(cfg *Config) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("config: mkdir %s: %w", dir, err)
 	}
-	// Ensure dir is 0700 even if it pre-existed with broader perms.
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("config: chmod %s: %w", dir, err)
 	}
@@ -98,7 +169,6 @@ func Save(cfg *Config) error {
 		os.Remove(tmp)
 		return fmt.Errorf("config: close temp: %w", err)
 	}
-	// Defensive: ensure 0600 before rename.
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("config: chmod temp: %w", err)

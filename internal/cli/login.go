@@ -43,7 +43,13 @@ func LoginCmd(reg *provider.Registry, st store.Store, stdout, stderr io.Writer) 
 			if tenant != "" && h.Provider != "ms" {
 				return userErr("--tenant is only valid for the ms provider")
 			}
-			p, _ := reg.Get(h.Provider)
+			p, perr := reg.Resolve(h.Provider, h.Label)
+			if perr != nil {
+				if errors.Is(perr, provider.ErrNotConfigured) {
+					return userErr("no OAuth client configured for %s. Run: apl setup %s --label %s", h.String(), h.Provider, h.Label)
+				}
+				return userErr("%s", perr.Error())
+			}
 
 			// Fast path: existing record, no --force, no --scope override.
 			if !force && len(scopes) == 0 {

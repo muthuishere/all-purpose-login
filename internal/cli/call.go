@@ -145,7 +145,13 @@ func runCall(parentCtx context.Context, reg *provider.Registry, st store.Store, 
 	}
 
 	// 6. Resolve provider + load record.
-	p, _ := reg.Get(h.Provider)
+	p, perr := reg.Resolve(h.Provider, h.Label)
+	if perr != nil {
+		if errors.Is(perr, provider.ErrNotConfigured) {
+			return userErr("apl call: no OAuth client configured for %s. Run: apl setup %s --label %s (user error)", h.String(), h.Provider, h.Label)
+		}
+		return userErr("apl call: %s (user error)", perr.Error())
+	}
 	rec, gerr := st.Get(parentCtx, h.String())
 	if gerr != nil {
 		if errors.Is(gerr, store.ErrNotFound) {

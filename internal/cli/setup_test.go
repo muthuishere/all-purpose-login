@@ -61,17 +61,16 @@ func (m *mergedShell) Available(name string) bool {
 
 func TestSetup_Idempotent_AlreadyConfigured(t *testing.T) {
 	setXDG(t)
-	// Pre-seed config with valid-looking IDs.
-	cfg := &config.Config{
-		Google: config.ProviderConfig{
-			ClientID:  "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com",
-			ProjectID: "apl-muthu-abc",
-		},
-		Microsoft: config.ProviderConfig{
-			ClientID: "11111111-2222-3333-4444-555555555555",
-			Tenant:   "common",
-		},
-	}
+	// Pre-seed config with valid-looking IDs under label "test".
+	cfg := &config.Config{}
+	cfg.SetProvider("google", "test", config.ProviderConfig{
+		ClientID:  "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com",
+		ProjectID: "apl-muthu-abc",
+	})
+	cfg.SetProvider("ms", "test", config.ProviderConfig{
+		ClientID: "11111111-2222-3333-4444-555555555555",
+		Tenant:   "common",
+	})
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -83,6 +82,7 @@ func TestSetup_Idempotent_AlreadyConfigured(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	opts := SetupOptions{
 		Providers: []string{"google", "microsoft"},
+		Label:     "test",
 		Shell:     fs, Prompter: p, Validator: v,
 		Stdout: &stdout, Stderr: &stderr,
 	}
@@ -102,12 +102,11 @@ func TestSetup_Idempotent_AlreadyConfigured(t *testing.T) {
 
 func TestSetup_Reconfigure_ForcesReprompting(t *testing.T) {
 	setXDG(t)
-	cfg := &config.Config{
-		Google: config.ProviderConfig{
-			ClientID:  "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com",
-			ProjectID: "apl-muthu-abc",
-		},
-	}
+	cfg := &config.Config{}
+	cfg.SetProvider("google", "test", config.ProviderConfig{
+		ClientID:  "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com",
+		ProjectID: "apl-muthu-abc",
+	})
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -121,6 +120,7 @@ func TestSetup_Reconfigure_ForcesReprompting(t *testing.T) {
 
 	opts := SetupOptions{
 		Providers:   []string{"google"},
+		Label:       "test",
 		Reconfigure: true,
 		Shell:       fs, Prompter: p, Validator: v,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
@@ -132,22 +132,22 @@ func TestSetup_Reconfigure_ForcesReprompting(t *testing.T) {
 		t.Fatal("expected shell calls when --reconfigure is set")
 	}
 
-	// New client ID should be written.
+	// New client ID should be written into google[test].
 	got, err := config.Load()
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if !strings.HasPrefix(got.Google.ClientID, "409786642553-zyxwvu") {
-		t.Errorf("expected new clientID to be written, got %q", got.Google.ClientID)
+	pc, _ := got.GetProvider("google", "test")
+	if !strings.HasPrefix(pc.ClientID, "409786642553-zyxwvu") {
+		t.Errorf("expected new clientID to be written, got %q", pc.ClientID)
 	}
 }
 
 func TestSetup_Reset_WipesAndReruns(t *testing.T) {
 	dir := setXDG(t)
-	cfg := &config.Config{
-		Google:    config.ProviderConfig{ClientID: "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com", ProjectID: "apl-muthu-abc"},
-		Microsoft: config.ProviderConfig{ClientID: "11111111-2222-3333-4444-555555555555", Tenant: "common"},
-	}
+	cfg := &config.Config{}
+	cfg.SetProvider("google", "test", config.ProviderConfig{ClientID: "409786642553-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com", ProjectID: "apl-muthu-abc"})
+	cfg.SetProvider("ms", "test", config.ProviderConfig{ClientID: "11111111-2222-3333-4444-555555555555", Tenant: "common"})
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestSetup_Reset_WipesAndReruns(t *testing.T) {
 	// After reset+no providers, config should be wiped (empty) or file absent.
 	got, err := config.Load()
 	if err == nil {
-		if got.Google.ClientID != "" || got.Microsoft.ClientID != "" {
+		if len(got.Google) != 0 || len(got.Microsoft) != 0 {
 			t.Errorf("reset failed; config still has values: %+v", got)
 		}
 	}
@@ -189,6 +189,7 @@ func TestSetup_ProviderFilter_GoogleOnly(t *testing.T) {
 	v := &fakeValidator{}
 	opts := SetupOptions{
 		Providers: []string{"google"},
+		Label:     "test",
 		Shell:     fs, Prompter: p, Validator: v,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	}
@@ -204,10 +205,11 @@ func TestSetup_ProviderFilter_GoogleOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got.Google.ClientID == "" {
+	gpc, _ := got.GetProvider("google", "test")
+	if gpc.ClientID == "" {
 		t.Error("expected google client id to be written")
 	}
-	if got.Microsoft.ClientID != "" {
+	if _, ok := got.GetProvider("ms", "test"); ok {
 		t.Error("expected microsoft to be untouched")
 	}
 }
@@ -226,6 +228,7 @@ func TestSetup_AbortMidFlow_NoPartialConfig(t *testing.T) {
 
 	opts := SetupOptions{
 		Providers: []string{"google"},
+		Label:     "test",
 		Shell:     fs, Prompter: p, Validator: v,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	}
@@ -236,7 +239,7 @@ func TestSetup_AbortMidFlow_NoPartialConfig(t *testing.T) {
 	// config should NOT exist / should be empty.
 	got, loadErr := config.Load()
 	if loadErr == nil {
-		if got.Google.ClientID != "" {
+		if pc, ok := got.GetProvider("google", "test"); ok && pc.ClientID != "" {
 			t.Errorf("partial config written: %+v", got)
 		}
 	}

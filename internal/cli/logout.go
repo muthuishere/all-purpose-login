@@ -24,7 +24,13 @@ func LogoutCmd(reg *provider.Registry, st store.Store, stdout, stderr io.Writer)
 			if err := ValidateProvider(h, reg); err != nil {
 				return userErr("%s", err.Error())
 			}
-			p, _ := reg.Get(h.Provider)
+			// Logout uses provider's revoke endpoint; resolve per-label so we
+			// hit the right OAuth client. If not configured locally, fall back
+			// to a type-level provider — token may still revoke at the IdP.
+			p, perr := reg.Resolve(h.Provider, h.Label)
+			if perr != nil {
+				p, _ = reg.Get(h.Provider)
+			}
 			rec, err := st.Get(cmd.Context(), h.String())
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {

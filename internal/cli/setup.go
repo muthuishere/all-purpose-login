@@ -17,6 +17,7 @@ import (
 // SetupOptions drive RunSetup. Tests inject fakes; production uses real shells.
 type SetupOptions struct {
 	Providers   []string // "google", "microsoft"; empty = both
+	Label       string   // handle label, e.g. "muthuishere", "deemwar"
 	Reconfigure bool
 	Reset       bool
 
@@ -101,12 +102,16 @@ func RunSetup(ctx context.Context, opts SetupOptions) error {
 		return nil
 	}
 
-	// Idempotency: gather providers that are already configured.
+	if opts.Label == "" {
+		return &ExitCoded{Code: 1, Err: fmt.Errorf("--label is required (e.g. --label muthuishere)")}
+	}
+
+	// Idempotency: gather providers that are already configured for this label.
 	alreadyOK := map[string]bool{}
 	for _, p := range providers {
-		if isConfigured(cur, p) && !opts.Reconfigure {
+		if isConfigured(cur, p, opts.Label) && !opts.Reconfigure {
 			alreadyOK[p] = true
-			fmt.Fprintf(opts.Stdout, "✓ %s already configured\n", displayName(p))
+			fmt.Fprintf(opts.Stdout, "✓ %s:%s already configured\n", providerKey(p), opts.Label)
 		}
 	}
 	allOK := true
@@ -130,17 +135,19 @@ func RunSetup(ctx context.Context, opts SetupOptions) error {
 		}
 		switch p {
 		case "microsoft":
-			pc, err := runMicrosoft(ctx, cur.Microsoft, opts.Shell, opts.Prompter, opts.Stdout, opts.Stderr)
+			existing, _ := cur.GetProvider("ms", opts.Label)
+			pc, err := runMicrosoft(ctx, existing, opts.Shell, opts.Prompter, opts.Stdout, opts.Stderr)
 			if err != nil {
 				return err
 			}
-			next.Microsoft = pc
+			next.SetProvider("ms", opts.Label, pc)
 		case "google":
-			pc, err := runGoogle(ctx, cur.Google, opts.Shell, opts.Prompter, opts.Validator, opts.Stdout, opts.Stderr)
+			existing, _ := cur.GetProvider("google", opts.Label)
+			pc, err := runGoogle(ctx, existing, opts.Shell, opts.Prompter, opts.Validator, opts.Stdout, opts.Stderr)
 			if err != nil {
 				return err
 			}
-			next.Google = pc
+			next.SetProvider("google", opts.Label, pc)
 		default:
 			return fmt.Errorf("unknown provider %q", p)
 		}
@@ -178,29 +185,89 @@ func displayName(provider string) string {
 	return provider
 }
 
-func isConfigured(cfg *config.Config, provider string) bool {
+func isConfigured(cfg *config.Config, provider, label string) bool {
+	pc, ok := cfg.GetProvider(providerKey(provider), label)
+	if !ok {
+		return false
+	}
 	switch provider {
 	case "google":
-		return cfg.Google.ClientID != "" && googleClientIDRe.MatchString(cfg.Google.ClientID)
+		return pc.ClientID != "" && googleClientIDRe.MatchString(pc.ClientID)
 	case "microsoft":
-		return cfg.Microsoft.ClientID != ""
+		return pc.ClientID != ""
 	}
 	return false
 }
 
+// providerKey maps a setup-package provider name to the canonical
+// config/registry key (google→google, microsoft→ms).
+func providerKey(provider string) string {
+	switch provider {
+	case "microsoft":
+		return "ms"
+	}
+	return provider
+}
+
 // NewSetupCommand returns the cobra command tree for `apl setup`.
+//
+// Two execution paths share the same flag set:
+//   - Default (interactive): runs the legacy Prompter-driven flow.
+//   - LLM-driven: activated when --json or --resume is set; uses the
+//     resumable state-machine runner in internal/setup. Inputs come from
+//     flags (--account, --project-id, --client-secret-file, etc.). Each
+//     human hand-off emits an NDJSON `awaiting_human` / `awaiting_input`
+//     event with the exact console URL and required fields, then exits.
+//     Resume by re-invoking with --resume plus any newly-supplied flags.
 func NewSetupCommand() *cobra.Command {
 	var reconfigure, reset bool
+	var label string
+
+	// LLM-driven flags
+	var jsonOut, resume, status, resetState bool
+	var account, projectID, clientSecretFile, appID, includeRecording, reuse, reuseConfirm string
 
 	mkRun := func(providers []string) func(cmd *cobra.Command, args []string) error {
 		return func(cmd *cobra.Command, args []string) error {
-			// When invoked at the top level (no subcommand), default = both.
+			// LLM path — single provider per invocation.
+			if jsonOut || resume || status || resetState {
+				if len(providers) != 1 {
+					return userErr("--json/--resume/--status require a subcommand: apl setup google|ms")
+				}
+				inputs := map[string]string{}
+				putIfSet := func(k, v string) {
+					if v != "" {
+						inputs[k] = v
+					}
+				}
+				putIfSet("account", account)
+				putIfSet("project_id", projectID)
+				putIfSet("client_secret_file", clientSecretFile)
+				putIfSet("app_id", appID)
+				putIfSet("include_recording", includeRecording)
+				putIfSet("reuse_confirm", reuseConfirm)
+				return RunLLMSetup(cmd.Context(), LLMSetupOptions{
+					Provider: providerKey(providers[0]),
+					Label:    label,
+					JSON:     jsonOut,
+					Resume:   resume,
+					Status:   status,
+					ResetSt:  resetState,
+					Reuse:    reuse,
+					Inputs:   inputs,
+					Stdout:   cmd.OutOrStdout(),
+					Stderr:   cmd.ErrOrStderr(),
+				})
+			}
+
+			// Interactive path (legacy).
 			ps := providers
 			if len(ps) == 0 {
 				ps = []string{"google", "microsoft"}
 			}
 			return RunSetup(cmd.Context(), SetupOptions{
 				Providers:   ps,
+				Label:       label,
 				Reconfigure: reconfigure,
 				Reset:       reset,
 				Stdout:      cmd.OutOrStdout(),
@@ -216,6 +283,20 @@ func NewSetupCommand() *cobra.Command {
 	}
 	cmd.PersistentFlags().BoolVar(&reconfigure, "reconfigure", false, "force re-prompting even if already configured")
 	cmd.PersistentFlags().BoolVar(&reset, "reset", false, "wipe config.yaml then run full setup")
+	cmd.PersistentFlags().StringVar(&label, "label", "", "handle label (e.g. muthuishere, deemwar) — required")
+
+	// LLM-driven (state-machine) flags
+	cmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "emit NDJSON events; suspend at human hand-off")
+	cmd.PersistentFlags().BoolVar(&resume, "resume", false, "resume from saved setup state")
+	cmd.PersistentFlags().BoolVar(&status, "status", false, "print state file for this provider:label and exit")
+	cmd.PersistentFlags().BoolVar(&resetState, "reset-state", false, "delete state file for this provider:label and exit")
+	cmd.PersistentFlags().StringVar(&account, "account", "", "gcloud/az account email to use")
+	cmd.PersistentFlags().StringVar(&projectID, "project-id", "", "GCP project_id (existing or to create)")
+	cmd.PersistentFlags().StringVar(&clientSecretFile, "client-secret-file", "", "path to downloaded Google OAuth client_secret JSON")
+	cmd.PersistentFlags().StringVar(&appID, "app-id", "", "existing Azure AD application (client) ID")
+	cmd.PersistentFlags().StringVar(&includeRecording, "include-recording", "", "yes|true to opt into OnlineMeetingRecording.Read.All (admin consent)")
+	cmd.PersistentFlags().StringVar(&reuse, "reuse", "", "reuse another label's project + OAuth client (e.g. --reuse=muthuishere)")
+	cmd.PersistentFlags().StringVar(&reuseConfirm, "reuse-confirm", "", "yes to confirm reusing the existing project")
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "google",
